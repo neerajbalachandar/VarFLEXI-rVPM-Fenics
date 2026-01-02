@@ -1,9 +1,11 @@
-# All sort of functions for processing, calculation of aerodynamic forces, fluid domain,
-# visualization etc...
+# All sort of functions for postprocessing that are not relevant for the solver
+# or geometry definition (calculation of aerodynamic forces, fluid domain,
+# visualization, etc).
+
 
 
 ################################################################################
-# WING PROCESSING
+# WING POSTPROCESSING
 ################################################################################
 """
   `calculate_field(wing, field_name [, qinf, S, l, r_cg])`
@@ -37,85 +39,84 @@ function calculate_field(wing, field_name::String;
 
     F, SS, D, L = _calculate_forces(wing, rhoinf; t=t,
                                             lifting_interac=lifting_interac)
-
-    _addsolution(wing, "Ftot", F) #Total forces per panel/horseshoe :: vector/array
-    _addsolution(wing, "S", SS) #Sideslip components per panel
-    _addsolution(wing, "D", D) #drag component per panel
-    _addsolution(wing, "L", L) #lift components per panel
+    _addsolution(wing, "Ftot", F)
+    _addsolution(wing, "S", SS)
+    _addsolution(wing, "D", D)
+    _addsolution(wing, "L", L)
 
   ######## FORCE COEFFICIENTS ###########################
-  # elseif field_name in ["CFtot", "CL", "CS", "CD"]
-  #   if rhoinf==nothing && qinf!="automatic"
-  #     println("$(field_name) requested with a given qinf, but rhoinf is missing"
-  #               *". Given qinf will be ignored.")
-  #     Vinf = _aveVinf(wing; t=t)
-  #     _rhoinf = 1.0
-  #     _qinf = (1.0/2)*_rhoinf*dot(Vinf, Vinf)
-  #   elseif qinf=="automatic"
-  #     Vinf = _aveVinf(wing; t=t)
-  #     _rhoinf = 1.0
-  #     _qinf = (1.0/2)*_rhoinf*dot(Vinf, Vinf)
-  #   else
-  #     _rhoinf = rhoinf
-  #     _qinf = qinf
-  #   end
-  #   _S = S=="automatic" ? _S = planform_area(wing) : S
+  elseif field_name in ["CFtot", "CL", "CS", "CD"]
+    if rhoinf==nothing && qinf!="automatic"
+      println("$(field_name) requested with a given qinf, but rhoinf is missing"
+                *". Given qinf will be ignored.")
+      Vinf = _aveVinf(wing; t=t)
+      _rhoinf = 1.0
+      _qinf = (1.0/2)*_rhoinf*dot(Vinf, Vinf)
+    elseif qinf=="automatic"
+      Vinf = _aveVinf(wing; t=t)
+      _rhoinf = 1.0
+      _qinf = (1.0/2)*_rhoinf*dot(Vinf, Vinf)
+    else
+      _rhoinf = rhoinf
+      _qinf = qinf
+    end
+    _S = S=="automatic" ? _S = planform_area(wing) : S
 
-  #   CF, CS, CD, CL = _calculate_force_coeffs(wing, _rhoinf, _qinf, _S; t=t,
-  #                                             lifting_interac=lifting_interac)
-  #   _addsolution(wing, "CFtot", CF)
-  #   _addsolution(wing, "CS", CS)
-  #   _addsolution(wing, "CD", CD)
-  #   _addsolution(wing, "CL", CL)
+    CF, CS, CD, CL = _calculate_force_coeffs(wing, _rhoinf, _qinf, _S; t=t,
+                                              lifting_interac=lifting_interac)
+    _addsolution(wing, "CFtot", CF)
+    _addsolution(wing, "CS", CS)
+    _addsolution(wing, "CD", CD)
+    _addsolution(wing, "CL", CL)
 
   ######## AERODYNAMIC FORCE COEFFICIENT PER UNIT SPAN NORMALIZED ##########
-  # elseif field_name in ["Cftot/CFtot", "Cd/CD", "Cs/CS", "Cl/CL"]
-  #   if rhoinf==nothing && qinf!="automatic"
-  #     println("$(field_name) requested with a given qinf, but rhoinf is missing"
-  #               *". Given qinf will be ignored.")
-  #     Vinf = _aveVinf(wing; t=t)
-  #     _rhoinf = 1.0
-  #     _qinf = (1.0/2)*_rhoinf*dot(Vinf, Vinf)
-  #   elseif qinf=="automatic"
-  #     Vinf = _aveVinf(wing; t=t)
-  #     _rhoinf = 1.0
-  #     _qinf = (1.0/2)*_rhoinf*dot(Vinf, Vinf)
-  #   else
-  #     _rhoinf = rhoinf
-  #     _qinf = qinf
-  #   end
-  #   _S = S=="automatic" ? _S = planform_area(wing) : S
+  elseif field_name in ["Cftot/CFtot", "Cd/CD", "Cs/CS", "Cl/CL"]
+    if rhoinf==nothing && qinf!="automatic"
+      println("$(field_name) requested with a given qinf, but rhoinf is missing"
+                *". Given qinf will be ignored.")
+      Vinf = _aveVinf(wing; t=t)
+      _rhoinf = 1.0
+      _qinf = (1.0/2)*_rhoinf*dot(Vinf, Vinf)
+    elseif qinf=="automatic"
+      Vinf = _aveVinf(wing; t=t)
+      _rhoinf = 1.0
+      _qinf = (1.0/2)*_rhoinf*dot(Vinf, Vinf)
+    else
+      _rhoinf = rhoinf
+      _qinf = qinf
+    end
+    _S = S=="automatic" ? _S = planform_area(wing) : S
 
-  #   Cf, Cs, Cd, Cl = _calculate_force_coeffs(wing, _rhoinf, _qinf, _S;
-  #                                             per_unit_span=true, t=t,
-  #                                             lifting_interac=lifting_interac)
+    Cf, Cs, Cd, Cl = _calculate_force_coeffs(wing, _rhoinf, _qinf, _S;
+                                              per_unit_span=true, t=t,
+                                              lifting_interac=lifting_interac)
 
-  #   # Converts them into scalars
-  #   s_Cf, s_Cs, s_Cd, s_Cl = [], [], [],[]
-  #   scalars = [s_Cf, s_Cs, s_Cd, s_Cl]
-  #   aveVinf = _aveVinf(wing; t=t)
-  #   for (i, f) in enumerate([Cf, Cs, Cd, Cl])
-  #     for elem in f
-  #       if i==3     # Keeps the sign for the drag direction
-  #         sgn = sign(dot(elem, aveVinf))
-  #       else
-  #         sgn = 1
-  #       end
-  #       push!(scalars[i], sgn*norm(elem))
-  #     end
-  #   end
+    # Converts them into scalars
+    s_Cf, s_Cs, s_Cd, s_Cl = [], [], [],[]
+    scalars = [s_Cf, s_Cs, s_Cd, s_Cl]
+    aveVinf = _aveVinf(wing; t=t)
+    for (i, f) in enumerate([Cf, Cs, Cd, Cl])
+      for elem in f
+        if i==3     # Keeps the sign for the drag direction
+          sgn = sign(dot(elem, aveVinf))
+        else
+          sgn = 1
+        end
+        push!(scalars[i], sgn*norm(elem))
+      end
+    end
 
-  #   # Calculates overalls
-  #   info = fields_summary(wing)
+    # Calculates overalls
+    info = fields_summary(wing)
 
-  #   # Determines the span of the wing
-  #   _min, _max = _span_eff(wing)
-  #   span = _max-_min
+    # Determines the span of the wing
+    _min, _max = _span_eff(wing)
+    span = _max-_min
 
-  #   _addsolution(wing, "Cftot/CFtot", s_Cf/(info["CFtot"]/span))
-  #   _addsolution(wing, "Cs/CS", s_Cs/(info["CS"]/span))
-  #   _addsolution(wing, "Cd/CD", s_Cd/(info["CD"]/span))
-  #   _addsolution(wing, "Cl/CL", s_Cl/(info["CL"]/span))
+    _addsolution(wing, "Cftot/CFtot", s_Cf/(info["CFtot"]/span))
+    _addsolution(wing, "Cs/CS", s_Cs/(info["CS"]/span))
+    _addsolution(wing, "Cd/CD", s_Cd/(info["CD"]/span))
+    _addsolution(wing, "Cl/CL", s_Cl/(info["CL"]/span))
 
   ######## PANEL AREA ###########################
   elseif field_name=="A"
@@ -130,24 +131,24 @@ function calculate_field(wing, field_name::String;
 
     Mtot, M_L, M_M, M_N = _calculate_moments(wing, _r_cg)
     _addsolution(wing, "Mtot", Mtot)
-    _addsolution(wing, "M_L", M_L) #moments decomposed to roll/pitch/yaw vectors 
+    _addsolution(wing, "M_L", M_L)
     _addsolution(wing, "M_M", M_M)
     _addsolution(wing, "M_N", M_N)
 
 
   ######## MOMENTS COEFFICIENTS ###########################
-  # elseif field_name in ["CMtot", "CM_L", "CM_M", "CM_N"]
-  #   if qinf in ["automatic", nothing, 0.0]
-  #     error("$(field_name) requested but qinf is missing")
-  #   end
+  elseif field_name in ["CMtot", "CM_L", "CM_M", "CM_N"]
+    if qinf in ["automatic", nothing, 0.0]
+      error("$(field_name) requested but qinf is missing")
+    end
 
-  #   _l = l=="automatic" ? get_barc(wing) : l
-  #   _S = S=="automatic" ? planform_area(wing) : S
+    _l = l=="automatic" ? get_barc(wing) : l
+    _S = S=="automatic" ? planform_area(wing) : S
 
-  #   _addsolution(wing, "CMtot", wing.sol["Mtot"]/(qinf*_S*_l))
-  #   _addsolution(wing, "CM_L", wing.sol["M_L"]/(qinf*_S*_l))
-  #   _addsolution(wing, "CM_M", wing.sol["M_M"]/(qinf*_S*_l))
-  #   _addsolution(wing, "CM_N", wing.sol["M_N"]/(qinf*_S*_l))
+    _addsolution(wing, "CMtot", wing.sol["Mtot"]/(qinf*_S*_l))
+    _addsolution(wing, "CM_L", wing.sol["M_L"]/(qinf*_S*_l))
+    _addsolution(wing, "CM_M", wing.sol["M_M"]/(qinf*_S*_l))
+    _addsolution(wing, "CM_N", wing.sol["M_N"]/(qinf*_S*_l))
 
   ######## ERROR CASE ###################################
   else
@@ -168,12 +169,11 @@ function _calculate_forces(wing, rhoinf::FWrap;
                           t::FWrap=0.0, per_unit_span::Bool=false,
                           lifting_interac::Bool=true)
 
-  F = [] #total force vector per horseshoe
-  m = get_m(wing) #number of horseshoe/control_points/bound vortices
+  F = []
+  m = get_m(wing)
 
   # -------------- CALCULATES TOTAL FORCE F
-  # Iterates over horseshoes: spanwise and chordwise
-
+  # Iterates over horseshoes
   for i in 1:m
     Ap, A, B, Bp, CP, infDA, infDB, Gamma = getHorseshoe(wing, i)
     force = zeros(promote_type(typeof(rhoinf), typeof(Gamma), eltype(Ap), eltype(A), eltype(B), eltype(Bp)), 3)
@@ -209,7 +209,6 @@ function _calculate_forces(wing, rhoinf::FWrap;
     push!(F, force)
   end
 
-  
   # Case of calculating drag at the far field
   if !lifting_interac
     aveVinf = _aveVinf(wing; t=t)
@@ -227,16 +226,16 @@ function _calculate_forces(wing, rhoinf::FWrap;
 end
 
 
-# function _calculate_force_coeffs(wing, rhoinf::FWrap, qinf::FWrap,
-#                                   S::FWrap; t::FWrap=0.0,
-#                                   per_unit_span::Bool=false,
-#                                   lifting_interac::Bool=true)
-#   F,SS,D,L = _calculate_forces(wing, rhoinf; t=t, per_unit_span=per_unit_span,
-#                                     lifting_interac=lifting_interac)
-#   aux = qinf*S
+function _calculate_force_coeffs(wing, rhoinf::FWrap, qinf::FWrap,
+                                  S::FWrap; t::FWrap=0.0,
+                                  per_unit_span::Bool=false,
+                                  lifting_interac::Bool=true)
+  F,SS,D,L = _calculate_forces(wing, rhoinf; t=t, per_unit_span=per_unit_span,
+                                    lifting_interac=lifting_interac)
+  aux = qinf*S
 
-#   return F/aux, SS/aux, D/aux, L/aux
-# end
+  return F/aux, SS/aux, D/aux, L/aux
+end
 
 "Calculates total moment and decomposition into roll, pitch, and yaw"
 function _calculate_moments(wing, r_cg)
@@ -270,81 +269,80 @@ function _calculate_moments(wing, r_cg)
   return Mtot, M_L, M_M, M_N
 end
 
-# "Calculates the force induced by the wake sheet assuming it planar in the
-# direction of Vinf. This method works well only for an isolated lifting surface
-# and should not be used on interacting lifting surfaces."
-# function calculate_force_trefftz(wing, Vinf::Vector{<:FWrap}, rho::FWrap;
-#                                         per_unit_span::Bool=false)
-#   HSs = getHorseshoes(wing)
-#   m = get_m(wing)
+"Calculates the force induced by the wake sheet assuming it planar in the
+direction of Vinf. This method works well only for an isolated lifting surface
+and should not be used on interacting lifting surfaces."
+function calculate_force_trefftz(wing, Vinf::Vector{<:FWrap}, rho::FWrap;
+                                        per_unit_span::Bool=false)
+  HSs = getHorseshoes(wing)
+  m = get_m(wing)
 
-#   DVinf = Vinf/norm(Vinf)
+  DVinf = Vinf/norm(Vinf)
 
-#   TF = promote_type(eltype(HSs[1]),eltype(DVinf))
+  TF = promote_type(eltype(HSs[1]),eltype(DVinf))
 
-#   Vinds = zeros(TF, m)   # Vortex sheet induced velocity at each bound vortex
-#   for i in 1:m  # Iterates over semi-infinite vortices calculating Vind
+  Vinds = zeros(TF, m)   # Vortex sheet induced velocity at each bound vortex
+  for i in 1:m  # Iterates over semi-infinite vortices calculating Vind
 
-#     if i==1 || HSs[i-1][3]!=HSs[i][2]
-#       gamma = HSs[i][8]
-#     else
-#       gamma = HSs[i][8] - HSs[i-1][8]
-#     end
-#     headVortex = HSs[i][2]      # Head of semi-infinite vortex at A
+    if i==1 || HSs[i-1][3]!=HSs[i][2]
+      gamma = HSs[i][8]
+    else
+      gamma = HSs[i][8] - HSs[i-1][8]
+    end
+    headVortex = HSs[i][2]      # Head of semi-infinite vortex at A
 
-#     bgamma = nothing
-#     if i==m || HSs[i][3]!=HSs[i+1][2]
-#       bgamma = -HSs[i][8]
-#       bheadVortex = HSs[i][3]
-#     end
+    bgamma = nothing
+    if i==m || HSs[i][3]!=HSs[i+1][2]
+      bgamma = -HSs[i][8]
+      bheadVortex = HSs[i][3]
+    end
 
-#     for j in 1:m    # Iterates over HS
+    for j in 1:m    # Iterates over HS
 
-#       # Determines distance from semi-infinite vortex
-#       meanAB = (HSs[j][3]+HSs[j][2])/2 # Position half-way A and B of this HS
-#       H = meanAB - headVortex          # Vector between head vortex and AB mean
-#       count_proj = H - DVinf*(dot(H, DVinf))  # Counter projection to inf vortex
-#       h = norm(count_proj)            # Normal distance to semi-infinite vortex
+      # Determines distance from semi-infinite vortex
+      meanAB = (HSs[j][3]+HSs[j][2])/2 # Position half-way A and B of this HS
+      H = meanAB - headVortex          # Vector between head vortex and AB mean
+      count_proj = H - DVinf*(dot(H, DVinf))  # Counter projection to inf vortex
+      h = norm(count_proj)            # Normal distance to semi-infinite vortex
 
-#       # Determines sign of induced velocity
-#       AB = HSs[j][3]-HSs[j][2]        # Direction from A to B
-#       sgn = sign(dot(cross(DVinf, AB), cross(DVinf, H)))
+      # Determines sign of induced velocity
+      AB = HSs[j][3]-HSs[j][2]        # Direction from A to B
+      sgn = sign(dot(cross(DVinf, AB), cross(DVinf, H)))
 
-#       if h>1e-8
-#         Vinds[j] += sgn*gamma/(4*pi*h)
-#       end
+      if h>1e-8
+        Vinds[j] += sgn*gamma/(4*pi*h)
+      end
 
-#       if bgamma!=nothing # Case this was the end of a wing
-#         H = meanAB - bheadVortex
-#         count_proj = H - DVinf*(dot(H, DVinf))
-#         h = norm(count_proj)
-#         sgn = sign(dot(cross(DVinf, AB), cross(DVinf, H)))
-#         if h>1e-8
-#           Vinds[j] += sgn*bgamma/(4*pi*h)
-#         end
-#       end
+      if bgamma!=nothing # Case this was the end of a wing
+        H = meanAB - bheadVortex
+        count_proj = H - DVinf*(dot(H, DVinf))
+        h = norm(count_proj)
+        sgn = sign(dot(cross(DVinf, AB), cross(DVinf, H)))
+        if h>1e-8
+          Vinds[j] += sgn*bgamma/(4*pi*h)
+        end
+      end
 
-#     end
-#   end
+    end
+  end
 
 
-#   F = [zeros(TF, 3) for i in 1:m]
-#   for i in 1:m  # Iterates over bound vortex calculating induced force
-#     _, A, B, _, _, _, _, Gamma  = HSs[i]
-#     AB = B-A
-#     count_proj = AB - DVinf*(dot(AB, DVinf))  # Counter projection about inf vortex
-#     l = norm(count_proj)        # Length normal to inf vortex direction
-#     if per_unit_span
-#       unitspan = l
-#     else
-#       unitspan = 1
-#     end
-#     F[i] += rho*Gamma*Vinds[i]*l*DVinf / unitspan
-#   end
+  F = [zeros(TF, 3) for i in 1:m]
+  for i in 1:m  # Iterates over bound vortex calculating induced force
+    _, A, B, _, _, _, _, Gamma  = HSs[i]
+    AB = B-A
+    count_proj = AB - DVinf*(dot(AB, DVinf))  # Counter projection about inf vortex
+    l = norm(count_proj)        # Length normal to inf vortex direction
+    if per_unit_span
+      unitspan = l
+    else
+      unitspan = 1
+    end
+    F[i] += rho*Gamma*Vinds[i]*l*DVinf / unitspan
+  end
 
-#   return F
-# end
-
+  return F
+end
 
 "Returns the average Vinf from all control points"
 function _aveVinf(wing; t::FWrap=0.0)
@@ -444,3 +442,5 @@ function _span_eff(wing; min=Inf, max=-Inf)
     error("Logic error!")
   end
 end
+
+##### END OF WING POSTPROCESSING ###############################################
