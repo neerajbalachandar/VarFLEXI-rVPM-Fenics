@@ -1,0 +1,272 @@
+#=##############################################################################
+# DESCRIPTION
+    Subfilter-scale (SFS) turbulence models for large eddy simulation. See
+20210901 notebook for theory and implementation.
+
+# AUTHORSHIP
+  * Author    : Eduardo J Alvarez
+  * Email     : Edo.AlvarezR@gmail.com
+  * Created   : Sep 2021
+=###############################################################################
+
+"""
+    Model of vortex-stretching SFS contributions evaluated with direct
+particle-to-particle interactions. See 20210901 notebook for derivation.
+"""
+@inline function Estr_direct(target_particle, source_particle, r, zeta, transposed)
+    GS = get_Gamma(source_particle)
+    JS = get_J(source_particle)
+    JT = get_J(target_particle)
+
+    # Stretching term
+    if transposed
+        # Transposed scheme (Γq⋅∇')(Up - Uq)
+        S1 = (JT[1] - JS[1])*GS[1]+(JT[2] - JS[2])*GS[2]+(JT[3] - JS[3])*GS[3]
+        S2 = (JT[4] - JS[4])*GS[1]+(JT[5] - JS[5])*GS[2]+(JT[6] - JS[6])*GS[3]
+        S3 = (JT[7] - JS[7])*GS[1]+(JT[8] - JS[8])*GS[2]+(JT[9] - JS[9])*GS[3]
+    else
+        # Classic scheme (Γq⋅∇)(Up - Uq)
+        S1 = (JT[1] - JS[1])*GS[1]+(JT[4] - JS[4])*GS[2]+(JT[7] - JS[7])*GS[3]
+        S2 = (JT[2] - JS[2])*GS[1]+(JT[5] - JS[5])*GS[2]+(JT[8] - JS[8])*GS[3]
+        S3 = (JT[3] - JS[3])*GS[1]+(JT[6] - JS[6])*GS[2]+(JT[9] - JS[9])*GS[3]
+    end
+
+    sigma_inv = 1.0 / get_sigma(source_particle)[]
+    zeta_sgm = zeta(r*sigma_inv) * sigma_inv * sigma_inv * sigma_inv
+
+    # Add ζ_σ (Γq⋅∇)(Up - Uq)
+    get_SFS(target_particle)[1] += zeta_sgm*S1
+    get_SFS(target_particle)[2] += zeta_sgm*S2
+    get_SFS(target_particle)[3] += zeta_sgm*S3
+end
+
+function Estr_direct!(pfield)
+    if Threads.nthreads() > 1
+        Estr_direct_multithreaded(pfield)
+    else
+        Estr_direct_singlethreaded(pfield)
+    end
+end
+
+function Estr_direct_multithreaded(pfield::ParticleField)
+    n_per_thread, rem = divrem(pfield.np, Threads.nthreads())
+    n = n_per_thread + (rem > 0)
+    assignments = 1:n:pfield.np
+
+    Threads.@threads for i_assignment in eachindex(assignments)
+        start_idx = assignments[i_assignment]
+        end_idx = min(start_idx + n - 1, pfield.np)
+
+        # Calculate SFS contributions for the assigned particles
+        for i_target in start_idx:end_idx
+            target_particle = get_particle(pfield, i_target)
+            is_static(target_particle) && continue
+            tx, ty, tz = target_particle[1], target_particle[2], target_particle[3]
+
+            for source_particle in iterator(pfield)
+                sx, sy, sz = source_particle[1], source_particle[2], source_particle[3]
+
+                dx, dy, dz = sx - tx, sy - ty, sz - tz
+                r = sqrt(dx * dx + dy * dy + dz * dz)
+
+                Estr_direct(target_particle, source_particle, r, pfield.kernel.zeta, pfield.transposed)
+            end
+        end
+    end
+end
+
+function Estr_direct_singlethreaded(pfield::ParticleField)
+    for target_particle in iterator(pfield)
+        is_static(target_particle) && continue
+        tx, ty, tz = target_particle[1], target_particle[2], target_particle[3]
+
+        for source_particle in iterator(pfield)
+            sx, sy, sz = source_particle[1], source_particle[2], source_particle[3]
+
+            dx, dy, dz = sx - tx, sy - ty, sz - tz
+            r = sqrt(dx * dx + dy * dy + dz * dz)
+
+            Estr_direct(target_particle, source_particle, r, pfield.kernel.zeta, pfield.transposed)
+        end
+    end
+end
+
+function Estr_fmm!(target_pfield::ParticleField, source_pfield::ParticleField, target_tree, source_tree, direct_list)
+    if Threads.nthreads() > 1
+        Estr_fmm_multithread!(target_pfield, source_pfield, target_tree, source_tree, direct_list)
+    else
+        Estr_fmm_singlethread!(target_pfield, source_pfield, target_tree, source_tree, direct_list)
+    end
+end
+
+function Estr_fmm_multithread!(target_pfield::ParticleField, source_pfield::ParticleField, target_tree, source_tree, direct_list)
+
+    # total number of interactions
+    n_interactions = FastMultipole.get_n_interactions(1, target_tree.branches, 1, source_tree.branches, direct_list)
+    n_threads = Threads.nthreads()
+
+    # interactions per thread
+    n_per_thread, rem = divrem(n_interactions, n_threads)
+    rem > 0 && (n_per_thread += 1)
+    n_per_thread < 100 && (n_per_thread = 100)
+
+    # create assignments
+    assignments = Vector{UnitRange{Int64}}(undef,n_threads)
+    for i in eachindex(assignments)
+        assignments[i] = 1:0
+    end
+    FastMultipole.make_direct_assignments!(assignments, 1, target_tree.branches, 1, source_tree.branches, direct_list, n_threads, n_per_thread, nothing)
+
+    Threads.@threads for i_task in eachindex(assignments)
+        assignment = assignments[i_task]
+
+        # evaluate
+        for i_interaction in assignment
+            i_target, i_source = direct_list[i_interaction]
+            
+            target_index = target_tree.branches[i_target].bodies_index[1]
+            source_index = source_tree.branches[i_source].bodies_index[1]
+
+            # loop over source particles
+            for i_source in source_index
+                source_particle = get_particle(source_pfield, source_tree.sort_index_list[1][i_source])
+
+                # source position
+                sx, sy, sz = source_particle[1], source_particle[2], source_particle[3]
+
+                # loop over target particles
+                for i_target in target_index
+                    target_particle = get_particle(target_pfield, target_tree.sort_index_list[1][i_target])
+
+                    # target position
+                    tx, ty, tz = target_particle[1], target_particle[2], target_particle[3]
+
+                    # separation distance
+                    dx, dy, dz = sx - tx, sy - ty, sz - tz
+                    r = sqrt(dx * dx + dy * dy + dz * dz)
+
+                    # add Estr contribution
+                    Estr_direct(target_particle, source_particle, r, source_pfield.kernel.zeta, source_pfield.transposed)
+
+                end
+            end
+        end
+    end
+end
+
+function Estr_fmm_singlethread!(target_pfield::ParticleField, source_pfield::ParticleField, target_tree, source_tree, direct_list)
+
+    for (i_target, i_source) in direct_list
+    
+        target_index = target_tree.branches[i_target].bodies_index[1]
+        source_index = source_tree.branches[i_source].bodies_index[1]
+
+        # loop over source particles
+        for i_source in source_index
+            source_particle = get_particle(source_pfield, source_tree.sort_index_list[1][i_source])
+
+            # source position
+            sx, sy, sz = source_particle[1], source_particle[2], source_particle[3]
+
+            # loop over target particles
+            for i_target in target_index
+                target_particle = get_particle(target_pfield, target_tree.sort_index_list[1][i_target])
+
+                # target position
+                tx, ty, tz = target_particle[1], target_particle[2], target_particle[3]
+
+                # separation distance
+                dx, dy, dz = sx - tx, sy - ty, sz - tz
+                r = sqrt(dx * dx + dy * dy + dz * dz)
+
+                # add Estr contribution
+                Estr_direct(target_particle, source_particle, r, source_pfield.kernel.zeta, source_pfield.transposed)
+
+            end
+        end
+    end
+end
+
+"""
+    Model of vortex-stretching SFS contributions evaluated with fast multipole
+method. See 20210901 notebook for derivation.
+"""
+function Estr_fmm(pfield::ParticleField; reset_sfs=true, optargs...)
+    UJ_fmm(pfield; reset=false, sfs=true, sfs_type=0, reset_sfs,
+                            transposed_sfs=pfield.transposed, optargs...)
+end
+
+"""
+    SFS model wrapper that hides the static particles from the model in order
+to avoid potential numerical instabilities encountered at solid surfaces.
+"""
+function E_nostaticparticles(pfield, args...; E=Estr_fmm, optargs...)
+
+    @assert pfield.np < pfield.maxparticles "Sorting of particles is needed"*
+        " but all pre-allocated memory is already in use"
+
+    org_np = pfield.np
+    iaux = pfield.np + 1
+
+    # Fetch auxiliary memory
+    paux = get_particle(pfield, iaux; emptyparticle=true)
+
+    # Iterate over particles
+    for pi in pfield.np:-1:1
+
+        # Fetch target particles
+        p = get_particle(pfield, pi)
+
+        # Case that we found a static particle
+        if p.static[1]
+
+            if pi==pfield.np
+                nothing
+
+            # Swap this particle with last particle
+            else
+
+                # Fetch last particle
+                pnp = get_particle(pfield, pfield.np)
+
+                # Store static particle in auxiliary memory
+                fmm.overwriteBody(pfield.bodies, iaux-1, pi-1)
+                paux.circulation .= p.circulation
+                paux.C .= p.C
+                paux.static .= p.static
+
+                # Move last particle into the static particle's memory
+                fmm.overwriteBody(pfield.bodies, pi-1, pfield.np-1)
+                p.circulation .= pnp.circulation
+                p.C .= pnp.C
+                p.static .= pnp.static
+
+                # Move static particle into the last particle's memory
+                fmm.overwriteBody(pfield.bodies, pfield.np-1, iaux-1)
+                pnp.circulation .= paux.circulation
+                pnp.C .= paux.C
+                pnp.static .= paux.static
+
+            end
+
+            # Move "end of array" pointer to hide the static particle
+            pfield.np -= 1
+        end
+    end
+
+    # Call SFS model without the static particles
+    E(pfield, args...; optargs...)
+
+    # Restore static particles back to the field
+    # pfield.np = org_np
+
+    # NOTE: Here we add the auxiliary memory to the field and then remove it.
+    #       This is to make sure that the memory is cleaned and avoid potential
+    #       bugs
+    pfield.np = org_np + 1
+    remove_particle(pfield, pfield.np)
+
+    # # Sort particles to restore the original indexing
+    # sort!(iterator(pfield), by = p->p.index[1])
+
+end
