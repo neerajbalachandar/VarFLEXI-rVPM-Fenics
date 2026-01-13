@@ -1,132 +1,138 @@
 from dolfin import *
-from fenics import Constant, Function, AutoSubDomain, RectangleMesh, VectorFunctionSpace, interpolate, \
-    TrialFunction, TestFunction, Point, Expression, DirichletBC, project, \
-    Identity, inner, dx, ds, sym, grad, div, lhs, rhs, dot, File, solve, assemble_system
 import numpy as np
+from fenics_shells import *
+from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
-from fenicsprecice import Adapter
-from enum import Enum
-
-class LeftBoundary(SubDomain):
-    def inside(self, x, on_boundary):
-        return near(x[0], 0.0) and on_boundary
 
 
 class AirfoilFEM:
     def __init__(self,
                  L=1.0,
                  H=0.1,
-                 N_chords=40,
-                 Ny_per_quarter=5,
-                 E=1e6,
-                 nu=0.3,
-                 rho=3000):
+                 N_chords=50,
+                 Ny_per_quarter=5):
 
         self.L = L
         self.H = H
         self.N_chords = N_chords
 
-        # Mesh resolution
         self.Nx = 2 * N_chords
         self.Ny = 4 * Ny_per_quarter
-
         self.dx = L / self.Nx
         self.dy = H / self.Ny
+        self.y_cp = 0.75 * H
 
-        # y-index for control point (3/4 height)
-        self.y_cp_index = int(0.75 * self.Ny)
+        self.mesh = RectangleMesh(Point(0,0), Point(L,H), self.Nx, self.Ny)
 
-        # Mesh
-        self.mesh = RectangleMesh(Point(0.0, 0.0),
-                                  Point(L, H),
-                                  self.Nx,
-                                  self.Ny)
+        element = MixedElement([
+            VectorElement("Lagrange", triangle, 2),
+            FiniteElement("Lagrange", triangle, 1),
+            FiniteElement("N1curl", triangle, 1),
+            FiniteElement("N1curl", triangle, 1)
+        ])
 
-        # Function space
-        self.V = VectorFunctionSpace(self.mesh, "CG", 1)
+        self.Q = ProjectedFunctionSpace(self.mesh, element, num_projected_subspaces=2)
+        self.QF = self.Q.full_space
 
-        # Material
-        self.mu = Constant(E / (2*(1+nu)))
-        self.lmbda = Constant(E*nu / ((1+nu)*(1-2*nu)))
+        self.q_ = Function(self.QF)
+        self.q = TrialFunction(self.QF)
+        self.qt = TestFunction(self.QF)
 
-        # Boundary condition
-        self.bc = DirichletBC(self.V, Constant((0.0, 0.0)), LeftBoundary())
+        theta_, w_, R_gamma_, p_ = split(self.q_)
 
-        # Precompute force DOFs
-        self.force_dofs = self._compute_force_dofs()
+        E = Constant(10000000.0)
+        nu = Constant(0.3)
+        kappa = Constant(5.0/6.0)
+        t = Constant(1)
 
+        k = sym(grad(theta_))
+        gamma = grad(w_) - theta_
 
-    def eps(self, u):
-        return sym(grad(u))
+        D = (E*t**3)/(12.0*(1.0 - nu**2))
+        psi_b = 0.5*D*((1.0 - nu)*tr(k*k) + nu*(tr(k))**2)
 
-    def sigma(self, u):
-        return self.lmbda * div(u) * Identity(2) + 2 * self.mu * self.eps(u)
+        psi_s = ((E*kappa*t)/(4.0*(1.0 + nu)))*inner(R_gamma_, R_gamma_)
 
-    def _compute_force_dofs(self):
+        dSp = Measure('dS', metadata={'quadrature_degree': 1})
+        dsp = Measure('ds', metadata={'quadrature_degree': 1})
+        n = FacetNormal(self.mesh)
+        tvec = as_vector((-n[1], n[0]))
+
+        inner_e = lambda x, y: (inner(x, tvec)*inner(y, tvec))('+')*dSp + \
+                               (inner(x, tvec)*inner(y, tvec))('-')*dSp + \
+                               (inner(x, tvec)*inner(y, tvec))*dsp
+
+        Pi_R = inner_e(gamma - R_gamma_, p_)
+
+        W_ext = Constant(0.0) * w_ * dx
+
+        self.Pi = psi_b*dx + psi_s*dx + Pi_R - W_ext
+
+        self.dPi = derivative(self.Pi, self.q_, self.qt)
+        self.J = derivative(self.dPi, self.q_, self.q)
+
+        self._compute_control_dofs()
+
+    def _compute_control_dofs(self):
+        self.w_dofs = []
         coords = self.mesh.coordinates()
-        dofmap = self.V.dofmap()
-
-        force_dofs = []
-
-        y = self.y_cp_index * self.dy
+        dofmap = self.Q.dofmap()
 
         for i in range(self.N_chords):
-            x = (2*i + 1) * self.dx  # mid-chord nodes
-
+            x = (2*i + 1) * self.dx
             for vi, c in enumerate(coords):
-                if near(c[0], x) and near(c[1], y):
+                if near(c[0], x, 1e-10) and near(c[1], self.y_cp, 1e-10):
                     dofs = dofmap.entity_dofs(self.mesh, 0, [vi])
-                    force_dofs.append(dofs)
+                    self.w_dofs.append(dofs[1])
                     break
 
-        return force_dofs
-
     def step(self, cp_forces):
-        """
-        cp_forces[i] = (Fx, Fy) for chord i
-        """
 
-        u = TrialFunction(self.V)
-        v = TestFunction(self.V)
+        A, b = assemble(self.Q, self.J, -self.dPi)
 
-        a = inner(self.sigma(u), self.eps(v)) * dx
-        L = dot(Constant((0.0, 0.0)), v) * dx
+        def left_boundary(x, on_boundary):
+            return on_boundary and near(x[0], 0.0)
 
-        A, b = assemble_system(a, L, self.bc)
 
-        # Apply forces
-        for dofs, F in zip(self.force_dofs, cp_forces):
-            b[dofs[0]] += F[0]
-            b[dofs[1]] += F[1]
+        bcs = [DirichletBC(self.Q, Constant((0.0, 0.0, 0.0)), left_boundary)]
 
-        uh = Function(self.V)
-        solve(A, uh.vector(), b)
+        for bc in bcs:
+            bc.apply(A, b)
 
-        return uh
+        for dof, f in zip(self.w_dofs, cp_forces):
+            b[dof] += -f
 
+        q_p = Function(self.Q)
+        solver = PETScLUSolver("mumps")
+        solver.solve(A, q_p.vector(), b)
+
+        reconstruct_full_space(self.q_, q_p, self.J, -self.dPi)
+
+        save_dir = "airfoil_output/"
+        theta_h, w_h, R_gamma_h, p_h = self.q_.split()
+        fields = {"theta": theta_h, "w": w_h, "R_gamma": R_gamma_h, "p": p_h}
+        for name, field in fields.items():
+            field.rename(name, name)
+            field_file = XDMFFile("%s/%s.xdmf" % (save_dir, name))
+            field_file.write(field)
+
+        return self.q_
+
+# ---------------------------
+# Run
+# ---------------------------
 if __name__ == "__main__":
+    fem = AirfoilFEM()
+    cp_forces = [1.0 for _ in range(fem.N_chords)]
+    q = fem.step(cp_forces)
 
-    fem = AirfoilFEM(L=1.0, H=0.1, N_chords=5, Ny_per_quarter=2)
-
-    cp_forces = [(0.0, -0.1) for _ in range(fem.N_chords)]
-
-    u = fem.step(cp_forces)
-
-    print("Simulation finished. Open deformation.pvd in ParaView.")
-
+    theta, w, _, _ = q.split()
     coords = fem.mesh.coordinates()
-    u_vals = u.compute_vertex_values(fem.mesh)
-    ux = u_vals[0::2]
-    uy = u_vals[1::2]
+    w_vals = w.compute_vertex_values(fem.mesh)
 
-    scale = 50
 
-    x_def = coords[:,0] + scale * ux
-    y_def = coords[:,1] + scale * uy
 
-    plt.figure(figsize=(10,2))
-    plt.triplot(coords[:,0], coords[:,1], fem.mesh.cells(), color="gray", linewidth=0.3)
-    plt.triplot(x_def, y_def, fem.mesh.cells(), color="red", linewidth=0.3)
-    plt.axis("equal")
-    plt.title("Deformed shape (red, scaled)")
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot_trisurf(coords[:,0], coords[:,1], w_vals, triangles=fem.mesh.cells())
     plt.show()
