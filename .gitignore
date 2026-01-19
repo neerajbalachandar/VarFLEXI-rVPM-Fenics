@@ -1,0 +1,18 @@
+# Virtual environments
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# ML artifacts
+*.pth
+*.pt
+torch_extensions/
+
+# OS files
+.DS_Store
+
+# Data Path
+fluid-rvpm/fluid-result
+solid-fenics/airfoil_output
