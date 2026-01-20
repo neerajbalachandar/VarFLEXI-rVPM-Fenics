@@ -1,3 +1,66 @@
+from fenics import Constant, Function, AutoSubDomain, RectangleMesh, VectorFunctionSpace, interpolate, \
+    TrialFunction, TestFunction, Point, Expression, DirichletBC, project, \
+    Identity, inner, dx, ds, sym, grad, div, lhs, rhs, dot, File, solve, assemble_system
+import numpy as np
+import matplotlib.pyplot as plt
+from fenicsprecice import Adapter
+from enum import Enum
+
+
+
+# Define strain
+def epsilon(u):
+    return 0.5 * (grad(u) + grad(u).T)
+
+
+# Define Stress tensor
+def sigma(u):
+    return lambda_ * div(u) * Identity(dim) + 2 * mu * epsilon(u)
+
+
+# Define Mass form
+def m(u, v):
+    return rho * inner(u, v) * dx
+
+
+# Elastic stiffness form
+def k(u, v):
+    return inner(sigma(u), sym(grad(v))) * dx
+
+
+# External Work
+def Wext(u_):
+    return dot(u_, p) * ds
+
+
+# Update functions
+
+# Update acceleration
+def update_a(u, u_old, v_old, a_old, ufl=True):
+    if ufl:
+        dt_ = dt
+        beta_ = beta
+    else:
+        dt_ = float(dt)
+        beta_ = float(beta)
+
+    return ((u - u_old - dt_ * v_old) / beta / dt_ ** 2
+            - (1 - 2 * beta_) / 2 / beta_ * a_old)
+
+
+# Update velocity
+def update_v(a, u_old, v_old, a_old, ufl=True):
+    if ufl:
+        dt_ = dt
+        gamma_ = gamma
+    else:
+        dt_ = float(dt)
+        gamma_ = float(gamma)
+
+    return v_old + dt_ * ((1 - gamma_) * a_old + gamma_ * a)
+
+
+
 from dolfin import *
 import numpy as np
 from fenics_shells import *
@@ -118,9 +181,7 @@ class AirfoilFEM:
 
         return self.q_
 
-# ---------------------------
-# Run
-# ---------------------------
+#main
 if __name__ == "__main__":
     fem = AirfoilFEM()
     cp_forces = [1.0 for _ in range(fem.N_chords)]
