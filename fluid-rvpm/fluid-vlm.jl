@@ -13,7 +13,7 @@ import FLOWVLM as vlm
 
 run_name        = "simple-wing"            # Name of this simulation
 
-save_path       = run_name                  # Where to save this simulation
+save_path       = "/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/fluid-rvpm/fluid-result/"
 paraview        = true                      # Whether to visualize with Paraview
 
 
@@ -181,6 +181,15 @@ monitor_wing = uns.generate_monitor_wing(wing, Vinf, b, ar,
                                             figname="wing monitor",
                                             );
 
+
+# println("Launching Python force extractor...")
+
+# python_script = "/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/fluid-rvpm/force extract.py"
+
+# python_proc = run(
+#     `python3 $python_script`,
+#     wait = false
+# )
 
 
 
