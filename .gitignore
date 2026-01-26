@@ -14,7 +14,7 @@ torch_extensions/
 .DS_Store
 
 # Data Path
-fluid-rvpm/fluid-result
+fluid-rvpm/fluid-result/results
 solid-fenics/airfoil_output
 
 .vscode/
