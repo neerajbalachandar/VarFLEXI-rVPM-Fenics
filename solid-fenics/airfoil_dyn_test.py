@@ -7,7 +7,6 @@ from fenicsprecice import Adapter
 from enum import Enum
 
 
-
 # Define strain
 def epsilon(u):
     return 0.5 * (grad(u) + grad(u).T)
