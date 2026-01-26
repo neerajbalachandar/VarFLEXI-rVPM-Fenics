@@ -11,6 +11,8 @@
 import FLOWUnsteady as uns
 import FLOWVLM as vlm
 
+include("src/")
+
 run_name        = "simple-wing"            # Name of this simulation
 
 save_path       = "/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/fluid-rvpm/fluid-result/"

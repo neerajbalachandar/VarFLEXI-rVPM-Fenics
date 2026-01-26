@@ -16,3 +16,6 @@ torch_extensions/
 # Data Path
 fluid-rvpm/fluid-result
 solid-fenics/airfoil_output
+
+.vscode/
+
