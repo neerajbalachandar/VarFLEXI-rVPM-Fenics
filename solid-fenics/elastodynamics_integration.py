@@ -7,18 +7,11 @@
 #
 # The most popular choice for the parameters is: :math:`\alpha_m,\alpha_f \leq 1/2` and :math:`\gamma=\dfrac{1}{2}+\alpha_m-\alpha_f`,
 # :math:`\beta=\dfrac{1}{4}\left(\gamma+\dfrac{1}{2}\right)^2` which ensures unconditional stability, optimal dissipation and second-order accuracy.
-#
-#
-# ---------------
-# Implementation
-# ---------------
-#
-# We consider a rectangular beam clamped at one end and loaded by a uniform vertical traction at the other end.
-# After importing the relevant modules, the mesh and subdomains for boundary conditions are defined::
 
 from dolfin import *
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # Form compiler options
 parameters["form_compiler"]["cpp_optimize"] = True
@@ -28,6 +21,14 @@ parameters["form_compiler"]["optimize"] = True
 x_len,y_len,z_len= 0.1,1.0,0.01
 n_x,n_y,n_z=60,10,5
 mesh = BoxMesh(Point(0., 0., 0.), Point(x_len,y_len,z_len), n_x, n_y, n_z)
+Vf = VectorFunctionSpace(mesh, "DG", 0)
+
+f_body = Function(Vf)
+
+tree = BoundingBoxTree()
+tree.build(mesh)
+
+
 
 # Sub domain for clamp at left end
 def left(x, on_boundary):
@@ -71,7 +72,7 @@ beta    = Constant((gamma+0.5)**2/4.)
 
 # Time-stepping parameters
 T       = 4.0
-Nsteps  = 50
+Nsteps  = 200
 dt = Constant(T/Nsteps)
 
 
@@ -97,6 +98,10 @@ p = Expression(("0", "0", "t <= tc ? p0*t/tc : 0"), t=0, tc=cutoff_Tc, p0=p0, de
 V = VectorFunctionSpace(mesh, "CG", 1)
 # Define function space for stresses
 Vsig = TensorFunctionSpace(mesh, "DG", 0)
+
+
+
+
 
 # Test and trial functions are defined and the unkown displacement (corresponding to :math:`\{u_{n+1}\}` for the current time step)
 # will be represented by the Function ``u``. Displacement, velocity and acceleration fields of the previous increment
@@ -148,7 +153,8 @@ def c(u, u_):
 
 # Work of external forces
 def Wext(u_):
-    return dot(u_, p)*dss(3)
+    return dot(u_, f_body)*dx
+
 
 # Functions for implementing the time stepping scheme are also defined. ``update_a`` returns :math:`\{\ddot{u}_{n+1}\}`
 # as a function of the variables at the previous increment and of the new displacement :math:`\{u_{n+1}\}`. The function accepts a keyword ``ufl`` so that the expressions involved can be used with UFL representations if ``True`` or with array of values if ``False`` (we will make use of both possibilities later).
@@ -262,13 +268,55 @@ def local_project(v, V, u=None):
         solver.solve_local_rhs(u)
         return
 
+#read the csv file for the time step
+def load_forces(step):
+    fname = f"/home/softroboticslabiith/Desktop/VarFLEXI-rVPM-Fenics/fluid-rvpm/fluid-result/control_point_forces/forces_step_{step:04d}.csv"
+    return pd.read_csv(fname)
+
+def apply_csv_forces_to_body_force(df, f_body):
+    #have to find the 3/4th of each chord (chords along y and each chord spans across x)
+    #apply force in -z direction
+    f_vec = f_body.vector()
+    dofmap = Vf.dofmap()
+
+    for _, row in df.iterrows():
+        x = Point(row["x"], row["y"], row["z"])
+        Gamma = row["Gamma"]
+
+        cell_id = tree.compute_first_entity_collision(x)
+        if cell_id < mesh.num_cells():
+            dofs = dofmap.cell_dofs(cell_id)
+
+            # z-component force (index 2)
+            f_vec[dofs[2]] += -Gamma
+
+
+#time loop, guess this should be the start of while.is_coupling() or actual couplin code.
 for (i, dt) in enumerate(np.diff(time)):
 
     t = time[i+1]
     print("Time: ", t)
 
     # Forces are evaluated at t_{n+1-alpha_f}=t_{n+1}-alpha_f*dt
-    p.t = t-float(alpha_f*dt)
+    #p.t = t-float(alpha_f*dt)
+
+
+
+    #explicit time dependent loading from csv's
+    # Clear previous timestep forces
+    f_body.vector().zero()
+
+    # Map generalized-alpha shifted time to force step
+    t_eff = t - float(alpha_f*dt)
+    step = int(t_eff / T * Nsteps)
+    step = max(0, min(step, Nsteps))
+
+    # Load and apply aerodynamic forces
+    df = load_forces(step)
+    apply_csv_forces_to_body_force(df, f_body)
+
+
+
 
     # Solve for new displacement
     res = assemble(L_form)
