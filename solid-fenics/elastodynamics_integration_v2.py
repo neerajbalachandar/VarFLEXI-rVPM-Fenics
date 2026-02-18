@@ -1,175 +1,63 @@
-#
-# ..    # gedit: set fileencoding=utf8 :
-#
-# .. _demo_elastodynamics:
-#
-# .. raw:: html
-#
-#  <a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/"><p align="center"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-sa/4.0/88x31.png"/></a><br />This work is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/">Creative Commons Attribution-ShareAlike 4.0 International License</a></p>
-#
-# ============================================
-# Time-integration of elastodynamics equation
-# ============================================
-#
-# This demo is implemented in a single Python file,
-# :download:`demo_elastodynamics.py`, which contains both the
-# variational forms and the solver.
-#
-# This demo shows how to perform time integration of transient elastodynamics using the generalized-:math:`\alpha` method [ERL2002]_. In particular it demonstrates how to:
-#
-# * formulate mass and damping forms of the elastodynamics equation
-# * implement the generalized-:math:`\alpha` method and its influence on the solution
-# * perform efficient computation of stresses using ``LocalSolver``
-#
-# The deformed structure evolution over time along with the axial stress will look as follows:
-#
-# .. image:: elastodynamics-transient_deformation.gif
-#    :width: 70%
-#    :align: center
-#
-#
-# -----------------------------------------
-# Introduction and elastodynamics equation
-# -----------------------------------------
-#
-# The elastodynamics equation combine the balance of linear momentum:
-#
-# .. math::
-#    \nabla \cdot \sigma + \rho b = \rho \ddot{u}
-#
-# where :math:`u` is the displacement vector field, :math:`\ddot{u}=\partial^2 u/\partial t^2` is the acceleration,
-# :math:`\rho` the material density, :math:`b` a given body force and :math:`\sigma` the stress tensor which is related
-# to the displacement through a constitutive equation. In the case of isotropic linearized elasticity, one has:
-#
-# .. math::
-#    \sigma =\lambda \text{tr}(\varepsilon)\mathbb{1} + 2\mu\varepsilon
-#
-# where :math:`\varepsilon = (\nabla u + (\nabla u)^T)/2` is the linearized strain tensor, :math:`\mathbb{1}` is the
-# identity of second-rank tensors and :math:`\lambda=\dfrac{E\nu}{(1+\nu)(1-2\nu)},\mu=\dfrac{E}{2(1+\nu)}` are the
-# Lame coefficients given as functions of the Young modulus :math:`E` and the Poisson ratio :math:`\nu`.
-#
-# The weak form is readily obtained by integrating by part the balance equation using a test function :math:`v\in V`
-# with :math:`V` being a suitable function space that satisfies the displacement boundary conditions:
-#
-# .. math::
-#    \int_{\Omega} \rho \ddot{u}\cdot v \, {\rm d} x + \int_{\Omega} \sigma(u):\varepsilon(v) \, {\rm d} x =
-#    \int_{\Omega} \rho b \cdot v  \, {\rm d} x + \int_{\partial\Omega} (\sigma\cdot n) \cdot v \, {\rm d} s \quad \text{for all } v\in V
-#
-# The previous equation can be written as follows:
-#
-# .. math::
-#    \text{Find }u\in V\text{ such that } m(\ddot{u},v) + k(u,v) = L(v) \quad \text{for all } v\in V
-#
-# where :math:`m` is the symmetric bilinear form associated with the mass matrix and :math:`k` the one associated with the stiffness matrix.
-#
-# After introducing the finite element space interpolation, one obtains the corresponding discretized evolution equation:
-#
-# .. math::
-#    \text{Find }\{u\}\in\mathbb{R}^n\text{ such that } \{v\}^T[M]\{\ddot{u}\} + \{v\}^T[K]\{u\} = \{v\}^T\{F\} \quad \text{for all } \{v\}\in\mathbb{R}^n
-#
-# which is a generalized :math:`n`-dof harmonic oscillator equation.
-#
-# Quite often in structural dynamics, structures do not oscillate perfectly but lose energy through various dissipative mechanisms (friction with air or supports,
-# internal dissipation through plasticity, damage, etc.). Dissipative terms can be introduced at the level of the constitutive equation if these mechanisms are well
-# known but quite often it is not the case. Dissipation can then be modeled by adding an *ad hoc* damping term depending on the structure velocity :math:`\dot{u}`
-# to the previous evolution equation:
-#
-# .. math::
-#    \text{Find }u\in V\text{ such that } m(\ddot{u},v) + c(\dot{u},v) + k(u,v) = L(v) \quad \text{for all } v\in V
-#
-# The damping form will be considered here as bilinear and symmetric, being therefore associated with a damping matrix :math:`[C]`.
-#
-# ~~~~~~~~~~~~~~~~~
-# Rayleigh damping
-# ~~~~~~~~~~~~~~~~~
-#
-# When little is known about the origin of damping in the structure, a popular choice for the damping matrix, known as *Rayleigh damping*, consists in using
-# a linear combination of the mass and stiffness matrix :math:`[C] = \eta_M[M]+\eta_K[K]` with two positive parameters :math:`\eta_M,\eta_K` which
-# can be fitted against experimental measures for instance (usually by measuring the damping ratio of two natural modes of vibration).
-#
-# ---------------------------------------------------------------
-# Time discretization using the generalized-:math:`\alpha` method
-# ---------------------------------------------------------------
-#
-# We now introduce a time discretization of the interval study :math:`[0;T]` in :math:`N+1` time increments :math:`t_0=0,t_1,\ldots,t_N,t_{N+1}=T`
-# with :math:`\Delta t=T/N` denoting the time step (supposed constant). The resolution will make use of the generalized-:math:`\alpha` method
-# which can be seen as an extension of the widely used Newmark-:math:`\beta` method in structural dynamics. As an implicit method, it is unconditionally
-# stable for a proper choice of coefficients so that quite large time steps can be used. It also allows for high frequency dissipation and offers a
-# second-order accuracy, i.e. in :math:`O(\Delta t^2)`.
-#
-# The method consists in solving the dynamic evolution equation at intermediate time between :math:`t_n` and :math:`t_{n+1}` as follows:
-#
-# .. math::
-#    [M]\{\ddot{u}_{n+1-\alpha_m}\} + [C]\{\dot{u}_{n+1-\alpha_f}\}+[K]\{u_{n+1-\alpha_f}\} = \{F(t_{n+1-\alpha_f})\}
-#
-# with the notation :math:`X_{n+1-\alpha} = (1-\alpha)X_{n+1}+\alpha X_{n}`. In addition, the following approximation for the displacement and velocity
-# at :math:`t_{n+1}` are used:
-#
-# .. math::
-#    \begin{align*}
-#    \{u_{n+1}\} &= \{u_{n}\}+\Delta t \{\dot{u}_{n}\} + \dfrac{\Delta t^2}{2}\left((1-2\beta)\{\ddot{u}_{n}\}+2\beta\{\ddot{u}_{n+1}\}\right) \\
-#    \{\dot{u}_{n+1}\} &= \{\dot{u}_{n}\} + \Delta t\left((1-\gamma)\{\ddot{u}_{n}\}+\gamma\{\ddot{u}_{n+1}\}\right)
-#    \end{align*}
-#
-# It can be seen that these are the relations of the Newmark method. The latter is therefore obtained as a particular case when :math:`\alpha_f=\alpha_m=0`.
-#
-# The problem can then be formulated in terms of unkown displacement at :math:`t_{n+1}` with:
-#
-# .. math::
-#    \{\ddot{u}_{n+1}\} = \dfrac{1}{\beta\Delta t^2}\left(\{u_{n+1}\} - \{u_{n}\}-\Delta t \{\dot{u}_{n}\} \right) - \dfrac{1-2\beta}{2\beta}\{\ddot{u}_{n}\}
-#
-# After plugging into the evolution and rearranging the known and unknown terms, one obtains the following system to solve:
-#
-# .. math::
-#    \begin{align*}
-#    [\bar{K}]\{u_{n+1}\} &= \{F(t_{n+1-\alpha_f})\} - \alpha_f[K]\{u_n\} \\
-#         &+ [C](c_1\{u_n\}+c_2\{\dot{u}_n\}-c_3\{\ddot{u}_n\})+[M](m_1\{u_n\}+m_2\{\dot{u}_n\}-m_3\{\ddot{u}_n\})
-#  \end{align*}
-#
-# where:
-#  * :math:`[\bar{K}] = (1-\alpha_f)[K]+c_1[C]+m_1[M]`
-#  * :math:`c_1 = \dfrac{\gamma(1-\alpha_f)}{\beta\Delta t}`
-#  * :math:`c_2 = 1-\gamma(1-\alpha_f)/\beta`
-#  * :math:`c_3 = \Delta t(1-\alpha_f)(1-\dfrac{\gamma}{2\beta})`
-#  * :math:`m_1 = \dfrac{(1-\alpha_m)}{\beta\Delta t^2}`
-#  * :math:`m_2 = \dfrac{(1-\alpha_m)}{\beta\Delta t}`
-#  * :math:`m_3 = 1-\dfrac{1-\alpha_m}{2\beta}`
-#
-# Once the linear system has been solved for :math:`\{u_{n+1}\}`, the new velocity and acceleration are computed using the previous formulae.
-#
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# Popular choice of parameters
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#
-# The most popular choice for the parameters is: :math:`\alpha_m,\alpha_f \leq 1/2` and :math:`\gamma=\dfrac{1}{2}+\alpha_m-\alpha_f`,
-# :math:`\beta=\dfrac{1}{4}\left(\gamma+\dfrac{1}{2}\right)^2` which ensures unconditional stability, optimal dissipation and second-order accuracy.
-#
-#
-# ---------------
-# Implementation
-# ---------------
-#
-# We consider a rectangular beam clamped at one end and loaded by a uniform vertical traction at the other end.
-# After importing the relevant modules, the mesh and subdomains for boundary conditions are defined::
-
 from dolfin import *
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
+from scipy.interpolate import interp1d
 
 # Form compiler options
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
+
+
+# Time-stepping parameters
+T       = 4.0
+Nsteps  = 200
+dt = Constant(T/Nsteps)
 # Define mesh
-mesh = BoxMesh(Point(0., 0., 0.), Point(1., 0.1, 0.04), 60, 10, 5)
+x,y,z = 0.1,1.0,0.01
+nx,ny,nz = 10,200,5
+mesh = BoxMesh(Point(0., 0., 0.), Point(x, y, z), nx, ny, nz)
 
 # Sub domain for clamp at left end
 def left(x, on_boundary):
-    return near(x[0], 0.) and on_boundary
+    return near(x[1], 0.) and on_boundary
 
 # Sub domain for rotation at right end
 def right(x, on_boundary):
-    return near(x[0], 1.) and on_boundary
+    return near(x[1], 1.) and on_boundary
+
+
+## LOADING CHANGES--------------------------
+
+# mesh func for aerodynamic loading surface, across the n_y chords in the discretization
+facet_markers = MeshFunction("size_t", mesh, mesh.topology().dim() - 1)
+facet_markers.set_all(0)
+x_34=0.75*x
+hx = x / nx
+hz = z / nz
+
+
+class AeroSurface(SubDomain):
+    def inside(self, X, on_boundary):
+        return (
+            on_boundary
+            and near(X[0], x_34, 0.5*hx)
+            and near(X[2], 0.0, 0.5*hz)
+        )
+
+
+aero_surface = AeroSurface()
+aero_surface.mark(facet_markers, 5)#giving 5 since others are for bcs, loads etc
+
+ds_aero = Measure("ds", domain=mesh, subdomain_data=facet_markers)
+
+# traction function space (continuous along the surface)
+Vt = VectorFunctionSpace(mesh, "CG", 1)
+t_aero = Function(Vt, name="AerodynamicTraction")
+
+
+## LOADING CHANGES--------------------------
 
 
 # Material parameters for the elastic constitutive relation, the material density :math:`\rho`
@@ -178,7 +66,7 @@ def right(x, on_boundary):
 
 # Elastic parameters
 E  = 1000.0
-nu = 0.3
+nu = 0.2
 mu    = Constant(E / (2.0*(1.0 + nu)))
 lmbda = Constant(E*nu / ((1.0 + nu)*(1.0 - 2.0*nu)))
 
@@ -186,8 +74,8 @@ lmbda = Constant(E*nu / ((1.0 + nu)*(1.0 - 2.0*nu)))
 rho = Constant(1.0)
 
 # Rayleigh damping coefficients
-eta_m = Constant(0.)
-eta_k = Constant(0.)
+eta_m = Constant(0.1)
+eta_k = Constant(0.1)
 
 # Parameters used for the time discretization scheme are now defined. First, the four parameters used by the
 # generalized-:math:`\alpha` method are chosen. Here, we used the optimal dissipation and second-order accuracy
@@ -203,10 +91,7 @@ beta    = Constant((gamma+0.5)**2/4.)
 # We also define the final time of the interval, the number of time steps and compute the associated time interval
 # between two steps::
 
-# Time-stepping parameters
-T       = 4.0
-Nsteps  = 50
-dt = Constant(T/Nsteps)
+
 
 
 # We now define the time-dependent loading. Body forces are zero and the imposed loading consists of a uniform vertical traction
@@ -216,8 +101,8 @@ dt = Constant(T/Nsteps)
 
 p0 = 1.
 cutoff_Tc = T/5
-# Define the loading as an expression depending on t
-p = Expression(("0", "t <= tc ? p0*t/tc : 0", "0"), t=0, tc=cutoff_Tc, p0=p0, degree=0)
+# Define the loading as an expression depending on t (REFERENCE, DONT DELETE)
+#p = Expression(("0", "0", "t <= tc ? p0*t/tc : 0"), t=0, tc=cutoff_Tc, p0=p0, degree=0)
 
 # A standard vectorial :math:`P^1` FunctionSpace is now defined for the displacement, velocity and acceleration fields. We also
 # define a tensorial DG-0 FunctionSpace for saving the stress field evolution::
@@ -268,17 +153,85 @@ def sigma(r):
 def m(u, u_):
     return rho*inner(u, u_)*dx
 
+
 # Elastic stiffness form
 def k(u, u_):
     return inner(sigma(u), sym(grad(u_)))*dx
+
 
 # Rayleigh damping form
 def c(u, u_):
     return eta_m*m(u, u_) + eta_k*k(u, u_)
 
-# Work of external forces
+
+
+## LOADING CHANGES--------------------------NOTE: Change ymin and ymax value accordingly
 def Wext(u_):
-    return dot(u_, p)*dss(3)
+    return dot(u_, t_aero) * ds_aero(5)
+
+
+
+def load_csv_traction(step, y_min= 0.0, y_max=1.0):
+
+    fname = f"/home/softroboticslabiith/Desktop/VarFLEXI-rVPM-Fenics/fluid-rvpm/fluid-result/control_point_forces/forces_step_{step:04d}.csv"
+    df = pd.read_csv(fname)
+    #print(df.columns)
+    if(step<3):
+        gamma_vals = df["Gamma"].values[:100]
+    else:
+        gamma_vals = df['ftot_z'].values[:100]
+        print(gamma_vals)
+    n = len(gamma_vals)
+
+    # Normalized span coordinate from CSV index
+    eta_csv = np.linspace(0.0, 1.0, n)
+
+    return interp1d(
+        eta_csv,
+        gamma_vals,
+        kind="linear",
+        bounds_error=False,
+        fill_value=(gamma_vals[0], gamma_vals[-1])
+    )
+
+
+
+def update_aero_traction(t_aero, gamma_eta_interp,
+                         y_min=0.0, y_max=1.0):
+
+    vec = t_aero.vector()
+    vec.zero()
+
+    #avoided dolfin epsilons
+    tolx=0.6*(x/nx)
+    tolz=0.6*(z/nz)
+
+    Vscalar = Vt.sub(0).collapse()
+    coords = Vscalar.tabulate_dof_coordinates().reshape((-1,3))
+
+    #for indices
+    dofs_x = Vt.sub(0).dofmap().dofs()
+    dofs_y = Vt.sub(1).dofmap().dofs()
+    dofs_z = Vt.sub(2).dofmap().dofs()
+
+    for i, X in enumerate(coords):
+
+        if abs(X[0]-x_34)<tolx and abs(X[2])<tolz:
+
+            eta = (X[1]-y_min)/(y_max-y_min)
+            eta = np.clip(eta,0.0,1.0) #req
+
+            fz = float(-gamma_eta_interp(eta)) #negative z loading.
+
+            vec[dofs_x[i]] = 0.0
+            vec[dofs_y[i]] = 0.0
+            vec[dofs_z[i]] = fz
+
+    vec.apply("insert")
+
+
+## LOADING CHANGES--------------------------
+
 
 # Functions for implementing the time stepping scheme are also defined. ``update_a`` returns :math:`\{\ddot{u}_{n+1}\}`
 # as a function of the variables at the previous increment and of the new displacement :math:`\{u_{n+1}\}`. The function accepts a keyword ``ufl`` so that the expressions involved can be used with UFL representations if ``True`` or with array of values if ``False`` (we will make use of both possibilities later).
@@ -290,6 +243,7 @@ def Wext(u_):
 
 # Update formula for acceleration
 # a = 1/(2*beta)*((u - u0 - v0*dt)/(0.5*dt*dt) - (1-2*beta)*a0)
+
 def update_a(u, u_old, v_old, a_old, ufl=True):
     if ufl:
         dt_ = dt
@@ -398,12 +352,36 @@ for (i, dt) in enumerate(np.diff(time)):
     print("Time: ", t)
 
     # Forces are evaluated at t_{n+1-alpha_f}=t_{n+1}-alpha_f*dt
-    p.t = t-float(alpha_f*dt)
+    #p.t = t-float(alpha_f*dt)
+
+
+    #-------LOADING UPDATE---------------
+
+    # Generalized-alpha consistent time 
+    force_time = t - float(alpha_f * dt)
+    step = int(force_time / T * Nsteps)
+    step = max(0, min(step, Nsteps))
+    #print("Processing step: ",step)
+
+    # Load and update aerodynamic traction
+    gamma_interp = load_csv_traction(step)
+    update_aero_traction(t_aero, gamma_interp)
+
+    #-------LOADING UPDATE---------------
+
+
 
     # Solve for new displacement
     res = assemble(L_form)
     bc.apply(res)
     solver.solve(K, u.vector(), res)
+
+
+    #verification
+    print("traction norm=", norm(t_aero.vector(),'l2'))
+    Fcheck = assemble(dot(Constant((0,0,1)), t_aero)*ds_aero(5))
+    print("Integrated aero force =", Fcheck)
+
 
 
     # Update old fields with new quantities
@@ -416,9 +394,9 @@ for (i, dt) in enumerate(np.diff(time)):
     local_project(sigma(u), Vsig, sig)
     xdmf_file.write(sig, t)
 
-    p.t = t
+    #p.t = t
     # Record tip displacement and compute energies
-    u_tip[i+1] = u(1., 0.05, 0.)[1]
+    u_tip[i+1] = u(0.05, 1.0, 0.)[1]
     E_elas = assemble(0.5*k(u_old, u_old))
     E_kin = assemble(0.5*m(v_old, v_old))
     E_damp += dt*assemble(c(v_old, v_old))
@@ -468,36 +446,3 @@ plt.ylabel("Energies")
 plt.ylim(0, 0.0011)
 plt.show()
 
-# ---------------------
-# Analyzing the results
-# ---------------------
-#
-# We first consider the case of zero Rayleigh damping :math:`\eta_M=\eta_K=0`. In this case, it can be observed that the evolution of the total energy depends
-# on the choice of the time-stepping scheme parameters. With :math:`\alpha_m=\alpha_f=0`, we recover the Newmark-:math:`\beta` method with :math:`\beta=0.25,\gamma=0.5`.
-# This scheme is known for being conservative. This can be observed (figure-left) in the constant total energy for :math:`t\geq T_c` when the loading is removed. On the contrary,
-# for non zero alpha parameters, e.g. :math:`\alpha_m=0.2, \alpha_f=0.4`, it can be observed (figure-right) that the energy is decreasing during this phase, indicating numerical damping.
-# For both cases, the scheme is unconditionally stable. Moreover, these differences vanish when reducing the time step.
-#
-# .. figure:: elastodynamics-energies_newmark.png
-#    :width: 60%
-#    :align: center
-#
-#    Newmark-:math:`\beta` method :math:`\alpha_m=\alpha_f=0`
-#
-# .. figure:: elastodynamics-energies_generalized_alpha.png
-#    :width: 60%
-#    :align: center
-#
-#    Generalized-:math:`\alpha` with :math:`\alpha_m=0.2, \alpha_f=0.4`
-#
-# For non-zero Rayleigh damping :math:`\eta_M=\eta_K=0.01`, the total energy including viscous dissipation tends to oscillate around a constant value, with oscillations vanishing for decreasing time steps.
-#
-# .. image:: elastodynamics-energies_generalized_alpha_damping.png
-#    :width: 60%
-#    :align: center
-#
-# -----------
-# References
-# -----------
-#
-# .. [ERL2002] Silvano Erlicher, Luca Bonaventura, Oreste Bursi. The analysis of the Generalized-alpha method for non-linear dynamic problems. Computational Mechanics, Springer Verlag, 2002, 28, pp.83-104, doi:10.1007/s00466-001-0273-z
