@@ -1,17 +1,5 @@
-#=##############################################################################
-# DESCRIPTION
-    45° swept-back wing at an angle of attack of 4.2°. This wing has an aspect
-    ratio of 5.0, a RAE 101 airfoil section with 12% thickness, and no dihedral,
-    twist, nor taper. This test case matches the experimental setup of Weber,
-    J., and Brebner, G., “Low-Speed Tests on 45-deg Swept-Back Wings, Part I,”
-    Tech. rep., 1951. The same case is used in a VLM calculation in Bertin's
-    Aerodynamics for Engineers, Example 7.2, pp. 343.
-=###############################################################################
-
 import FLOWUnsteady as uns
 import FLOWVLM as vlm
-
-include("src/")
 
 run_name        = "simple-wing"            # Name of this simulation
 
