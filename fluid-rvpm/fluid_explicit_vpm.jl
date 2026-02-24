@@ -1,14 +1,81 @@
 using Sockets
 using JSON
+using LinearAlgebra
 import FLOWUnsteady as uns
 import FLOWVLM as vlm
 
+# Avoid FLOWVLM colinearity edge-case crash when Gamma is `nothing` in
+# geometric-factor evaluations.
+vlm.VLMSolver._regularize(true)
+
+# Workaround for FLOWVLM colinearity bug:
+# when gamma===nothing, promote_type can become Union{Nothing,Float64}, and
+# zeros(::Type{Union{Nothing,Float64}}, 3) throws.
+function vlm.VLMSolver._V_AB(A::Vector{<:vlm.VLMSolver.FWrap}, B, C, gamma; ign_col::Bool=false)
+    r0 = B - A
+    r1 = C - A
+    r2 = C - B
+    crss = LinearAlgebra.cross(r1, r2)
+    magsqr = LinearAlgebra.dot(crss, crss) + (vlm.VLMSolver.regularize ? vlm.VLMSolver.core_rad : 0)
+
+    TF = gamma === nothing ? promote_type(eltype(A), eltype(B), eltype(C)) :
+                             promote_type(eltype(A), eltype(B), eltype(C), typeof(gamma))
+
+    if vlm.VLMSolver._check_collinear(magsqr / LinearAlgebra.norm(r0), vlm.VLMSolver.col_crit; ign_col=ign_col)
+        if ign_col == false && vlm.VLMSolver.n_col == 1 && vlm.VLMSolver.mute_warning == false
+            println("\n\t magsqr:$magsqr \n\t A:$A \n\t B:$B \n\t C:$C")
+        end
+        return zeros(TF, 3)
+    end
+
+    F1 = crss / magsqr
+    aux = r1 / sqrt(LinearAlgebra.dot(r1, r1)) - r2 / sqrt(LinearAlgebra.dot(r2, r2))
+    F2 = LinearAlgebra.dot(r0, aux)
+
+    if vlm.VLMSolver.blobify
+        F1 *= vlm.VLMSolver.gw(LinearAlgebra.norm(crss) / LinearAlgebra.norm(r0), vlm.VLMSolver.smoothing_rad)
+    end
+
+    return gamma === nothing ? (F1 * F2) : ((gamma / 4 / pi) * F1 * F2)
+end
+
+function vlm.VLMSolver._V_Ainf_out(A::Vector{<:vlm.VLMSolver.FWrap},
+                                   infD::Vector{<:vlm.VLMSolver.FWrap}, C, gamma;
+                                   ign_col::Bool=false)
+    AC = C - A
+    unitinfD = infD / sqrt(LinearAlgebra.dot(infD, infD))
+    AAp = LinearAlgebra.dot(unitinfD, AC) * unitinfD
+    Ap = AAp + A
+
+    boundAAp = vlm.VLMSolver._V_AB(A, Ap, C, gamma; ign_col=ign_col)
+
+    ApC = C - Ap
+    crss = LinearAlgebra.cross(infD, ApC)
+    mag = sqrt(LinearAlgebra.dot(crss, crss) + (vlm.VLMSolver.regularize ? vlm.VLMSolver.core_rad : 0))
+
+    TF = gamma === nothing ? promote_type(eltype(A), eltype(infD), eltype(C)) :
+                             promote_type(eltype(A), eltype(infD), eltype(C), typeof(gamma))
+
+    if vlm.VLMSolver._check_collinear(mag, vlm.VLMSolver.col_crit; ign_col=ign_col)
+        return zeros(TF, 3)
+    end
+
+    h = mag / sqrt(LinearAlgebra.dot(infD, infD))
+    n = crss / mag
+    F = n / h
+
+    if vlm.VLMSolver.blobify
+        F *= vlm.VLMSolver.gw(h, vlm.VLMSolver.smoothing_rad)
+    end
+
+    return gamma === nothing ? (F + boundAAp) : ((gamma / 4 / pi) * F + boundAAp)
+end
+
 
 # SIMULATION PARAMETERS
-
 AOA             = 4.2
-magVinf         = 49.7
-rho             = 0.93
+magVinf         = 10
+rho             = 0.10
 b               = 2.489
 ar              = 5.0
 tr              = 1.0
@@ -34,6 +101,15 @@ sigma_vlm_solver = -1
 sigma_vlm_surf   = 0.05*b
 shed_starting    = true
 vlm_rlx          = 0.7
+
+# Coupling stabilization (numerical damping)
+geom_relax       = 0.20           # 0<geom_relax<=1; lower is more damping
+force_relax      = 0.20           # 0<force_relax<=1
+max_abs_disp     = 0.01*b         # clamp incoming displacement magnitude
+max_abs_force    = 1.0e6          # clamp outgoing per-panel force component
+disp_scale_x     = 0.0            # keep 0 to avoid chord distortion instability
+disp_scale_y     = 0.0            # keep 0 to avoid spanwise panel collapse
+disp_scale_z     = 1.0
 
 Vinf(X,t) = magVinf*[cosd(AOA), 0.0, sind(AOA)]
 
@@ -67,6 +143,8 @@ Winit = zeros(3)
 simulation = uns.Simulation(vehicle, maneuver, Vref, RPMref, ttot;
                               Vinit=Vinit, Winit=Winit)
 
+# Maximum number of particles
+max_particles = (nsteps+1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step+1) + p_per_step)
 
 # GEOMETRY UPDATE
 function update_geometry_absolute(wing, wing_ref, u_cp)
@@ -84,10 +162,13 @@ function update_geometry_absolute(wing, wing_ref, u_cp)
     end
 
     # --- Bound vortices ---
-    for i in 1:m
-        wing._xn[i] = wing_ref._xn[i] + u_cp[i,1]
-        wing._yn[i] = wing_ref._yn[i] + u_cp[i,2]
-        wing._zn[i] = wing_ref._zn[i] + u_cp[i,3]
+    # NOTE: bound-vortex points have length m+1, while u_cp has m control points.
+    # Clamp the last point to the last control-point displacement.
+    for i in 1:(m+1)
+        idx = min(i, m)
+        wing._xn[i] = wing_ref._xn[i] + u_cp[idx,1]
+        wing._yn[i] = wing_ref._yn[i] + u_cp[idx,2]
+        wing._zn[i] = wing_ref._zn[i] + u_cp[idx,3]
     end
 
     # --- Leading & trailing edges ---
@@ -104,9 +185,11 @@ function update_geometry_absolute(wing, wing_ref, u_cp)
         wing._ztwingdcr[i] = wing_ref._ztwingdcr[i] + u_cp[idx,3]
     end
 
-    # Rebuild horseshoes next call
-    vlm._reset(wing; keep_Vinf=true)
+    # Rebuild horseshoes next call without clearing wing.sol["Gamma"].
+    # FLOWUnsteady expects previous-step Gamma during precalculations.
+    wing._HSs = nothing
 end
+
 
 
 # SOCKET CONNECTION
@@ -114,6 +197,10 @@ end
 println("Connecting to coupling server...")
 sock = connect("127.0.0.1", 9000)
 println("Fluid connected.")
+
+m_global = vlm.get_m(wing)
+u_cp_prev = zeros(Float64, m_global, 3)
+forces_prev = [zeros(3) for _ in 1:m_global]
 
 
 # TIME STEPPING LOOP
@@ -126,26 +213,48 @@ for step in 1:nsteps
     # 1. RECEIVE UPDATED GEOMETRY FROM SOLID
     # -----------------------------------------
     msg = JSON.parse(String(readline(sock)))
-    u_cp = reduce(hcat, msg["geometry"])'
-    # u_cp must be m x 3
+    geo = msg["geometry"]
+    m = vlm.get_m(wing)
+    @assert length(geo) == m
+
+    u_cp_raw = zeros(Float64, m, 3)
+    for i in 1:m
+        u_cp_raw[i,1] = Float64(geo[i][1])
+        u_cp_raw[i,2] = Float64(geo[i][2])
+        u_cp_raw[i,3] = Float64(geo[i][3])
+    end
+    u_cp_raw[:,1] .*= disp_scale_x
+    u_cp_raw[:,2] .*= disp_scale_y
+    u_cp_raw[:,3] .*= disp_scale_z
+    if any(!isfinite, u_cp_raw)
+        @warn "Non-finite displacement received; reusing previous geometry"
+        u_cp_raw .= u_cp_prev
+    end
+    u_cp_raw .= clamp.(u_cp_raw, -max_abs_disp, max_abs_disp)
+    u_cp = geom_relax .* u_cp_raw .+ (1 - geom_relax) .* u_cp_prev
+    u_cp_prev .= u_cp
 
     # -----------------------------------------
     # 2. UPDATE WING GEOMETRY
     # -----------------------------------------
     update_geometry_absolute(wing, wing_ref, u_cp)
+    if !haskey(wing.sol, "Gamma")
+        wing.sol["Gamma"] = zeros(m)
+    end
 
     # -----------------------------------------
     # 3. ADVANCE FLUID BY ONE STEP
     # -----------------------------------------
-    uns.run_simulation(simulation;
+    uns.run_simulation(simulation, 1;
         Vinf=Vinf,
         rho=rho,
         p_per_step=p_per_step,
+        max_particles=max_particles,
         sigma_vlm_solver=sigma_vlm_solver,
         sigma_vlm_surf=sigma_vlm_surf,
         sigma_rotor_surf=sigma_vlm_surf,
         sigma_vpm_overwrite=sigma_vpm_overwrite,
-        shed_starting=shed_starting,
+        shed_starting=(step == 1 ? shed_starting : false),
         vlm_rlx=vlm_rlx
     )
 
@@ -157,8 +266,20 @@ for step in 1:nsteps
 
     for i in 1:m
         Γ = wing.sol["Gamma"][i]
+        if !isfinite(Γ)
+            Γ = 0.0
+        end
         lift = rho * magVinf * Γ
-        forces[i] = [0.0, 0.0, lift]
+        fz = clamp(lift, -max_abs_force, max_abs_force)
+        forces[i] = [0.0, 0.0, fz]
+    end
+
+    # Force relaxation before sending to solid
+    for i in 1:m
+        for k in 1:3
+            forces[i][k] = force_relax*forces[i][k] + (1-force_relax)*forces_prev[i][k]
+        end
+        forces_prev[i] = copy(forces[i])
     end
 
     println("DEBUG: First force = ", forces[1])

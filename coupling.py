@@ -4,6 +4,12 @@ import json
 HOST = "127.0.0.1"
 PORT = 9000
 
+def read_json_line(stream, name):
+    line = stream.readline()
+    if line == "":
+        raise RuntimeError(f"{name} disconnected or sent empty line")
+    return json.loads(line)
+
 print("Starting coupling server...")
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -29,9 +35,8 @@ for step in range(1, nsteps+1):
 
     # 1) Receive geometry from solid (line-based)
     print("Waiting for geometry from solid...")
-    geo_line = solid_file.readline()
+    geo_data = read_json_line(solid_file, "Solid")
     print("Geometry received.")
-    geo_data = json.loads(geo_line)
     geometry = geo_data["geometry"]
 
     # 2) Send geometry to fluid
@@ -40,9 +45,8 @@ for step in range(1, nsteps+1):
 
     # 3) Receive forces from fluid
     print("Waiting for forces from fluid...")
-    force_line = fluid_file.readline()
+    force_data = read_json_line(fluid_file, "Fluid")
     print("Forces received.")
-    force_data = json.loads(force_line)
     forces = force_data["force"]
 
     # 🔎 DEBUG PRINT

@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import socket
 import json
+import os
 
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
@@ -44,13 +45,13 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0)
 
 t_aero = Function(Vt, name="AerodynamicTraction")
 
-E = 1000.0
+E = 100000.0
 nu = 0.2
 mu = Constant(E/(2.0*(1.0+nu)))
 lmbda = Constant(E*nu/((1.0+nu)*(1.0-2.0*nu)))
 rho = Constant(1.0)
-eta_m = Constant(0.1)
-eta_k = Constant(0.1)
+eta_m = Constant(0.5)
+eta_k = Constant(0.5)
 
 alpha_m = Constant(0.2)
 alpha_f = Constant(0.4)
@@ -173,7 +174,10 @@ def local_project(v, V, u=None):
         solver.solve_local_rhs(u)
 
 sig = Function(Vsig, name="sigma")
-xdmf_file = XDMFFile("elastodynamics-results.xdmf")
+out_dir = "solid-fenics/results"
+os.makedirs(out_dir, exist_ok=True)
+xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
+xdmf_file = XDMFFile(xdmf_path)
 xdmf_file.parameters["flush_output"] = True
 xdmf_file.parameters["functions_share_mesh"] = True
 xdmf_file.parameters["rewrite_function_mesh"] = False
@@ -181,23 +185,40 @@ xdmf_file.parameters["rewrite_function_mesh"] = False
 print("Connecting solid to coupling server...")
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.connect(("127.0.0.1", 9000))
+sock_file = sock.makefile("r")
 print("Solid connected.")
+
+# Communication discretization (must match fluid panel count)
+m_panels_comm = 100
+u_cp0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
+sock.sendall((json.dumps({"step": 0, "geometry": u_cp0}) + "\n").encode())
+print("Initial geometry sent.")
 
 time = np.linspace(0, T, Nsteps+1)
 u_tip = np.zeros((Nsteps+1,))
 energies = np.zeros((Nsteps+1,4))
 E_damp = 0
+force_relax = 0.20
+forces_prev = None
 
 for i in range(Nsteps):
+    print(f"Solid step {i+1}/{Nsteps}: waiting for force...")
 
-    msg = b""
-    while not msg.endswith(b"\n"):
-        msg += sock.recv(4096)
-
-    data = json.loads(msg.decode())
+    line = sock_file.readline()
+    if line == "":
+        raise RuntimeError("Coupling server disconnected while sending force data")
+    data = json.loads(line)
     forces = np.array(data["force"])
+    if not np.isfinite(forces).all():
+        raise RuntimeError(f"Non-finite force data at solid step {i+1}")
 
-    update_aero_traction(t_aero, forces)
+    if forces_prev is None:
+        forces_eff = forces.copy()
+    else:
+        forces_eff = force_relax*forces + (1.0-force_relax)*forces_prev
+    forces_prev = forces_eff.copy()
+
+    update_aero_traction(t_aero, forces_eff)
 
     rhs_vec = assemble(L_form)
     bc.apply(rhs_vec)
@@ -219,29 +240,34 @@ for i in range(Nsteps):
     energies[i+1,:] = np.array([E_elas,E_kin,E_damp,E_tot])
     u_tip[i+1] = u(0.05,1.0,0.0)[1]
 
-    m_panels = len(forces)
-    u_cp = []
-    for j in range(m_panels):
-        eta = j/(m_panels-1)
-        ux, uy, uz = u(0.05, eta, 0.0)
-        u_cp.append([ux,uy,uz])
+    # Send geometry for the next fluid step (not needed after final force)
+    if i < Nsteps - 1:
+        m_panels = len(forces_eff)
+        u_cp = []
+        denom = max(m_panels - 1, 1)
+        for j in range(m_panels):
+            eta = j/denom
+            ux, uy, uz = u(x_34, eta, 0.0)
+            u_cp.append([float(ux), float(uy), float(uz)])
 
-    m_initial = 100  # or correct number of panels
-    u_cp0 = [[0.0, 0.0, 0.0] for _ in range(m_initial)]
+        msg_geo = json.dumps({
+            "step": i + 1,
+            "geometry": u_cp
+        })
+        sock.sendall((msg_geo + "\n").encode())
+        print(f"Solid step {i+1}/{Nsteps}: geometry sent.")
 
-    msg0 = json.dumps({
-        "step": 0,
-        "geometry": u_cp0
-    })
-    sock.sendall((msg0+"\n").encode())
-
+sock_file.close()
 sock.close()
 print("Solid solver finished.")
+print(f"Solid field outputs: {xdmf_path}")
 
 plt.figure()
 plt.plot(time,u_tip)
 plt.xlabel("Time")
 plt.ylabel("Tip displacement")
+tip_plot = os.path.join(out_dir, "tip_displacement.png")
+plt.savefig(tip_plot, dpi=150)
 plt.show()
 
 plt.figure()
@@ -249,4 +275,7 @@ plt.plot(time,energies)
 plt.legend(("elastic","kinetic","damping","total"))
 plt.xlabel("Time")
 plt.ylabel("Energy")
+energy_plot = os.path.join(out_dir, "energies.png")
+plt.savefig(energy_plot, dpi=150)
 plt.show()
+print(f"Saved plots: {tip_plot}, {energy_plot}")
