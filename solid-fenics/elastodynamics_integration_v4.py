@@ -13,9 +13,49 @@ Nsteps = 200
 dt_value = T/Nsteps
 dt = Constant(dt_value)
 
-x, y, z = 0.1, 1.0, 0.01
-nx, ny, nz = 10, 200, 5
-mesh = BoxMesh(Point(0., 0., 0.), Point(x, y, z), nx, ny, nz)
+span = 1.0
+root_chord = 0.12
+tip_chord = 0.08
+thickness_ratio = 0.12
+leading_edge_sweep = 0.0
+
+nx, ny, nz = 32, 200, 8
+mesh = BoxMesh(Point(0.0, 0.0, -0.5), Point(1.0, span, 0.5), nx, ny, nz)
+span_strips = 200
+
+
+def chord_at(y_val):
+    eta = min(max(y_val / span, 0.0), 1.0)
+    return root_chord + (tip_chord - root_chord) * eta
+
+
+def x_leading_edge_at(y_val):
+    eta = min(max(y_val / span, 0.0), 1.0)
+    return leading_edge_sweep * eta
+
+
+def naca_half_thickness(xi):
+    xi_clip = min(max(xi, 0.0), 1.0)
+    return 5.0 * thickness_ratio * (
+        0.2969 * np.sqrt(xi_clip)
+        - 0.1260 * xi_clip
+        - 0.3516 * xi_clip**2
+        + 0.2843 * xi_clip**3
+        - 0.1015 * xi_clip**4
+    )
+
+
+coords = mesh.coordinates()
+for i in range(coords.shape[0]):
+    xi = coords[i, 0]
+    y_val = coords[i, 1]
+    z_ref = coords[i, 2]
+    chord = chord_at(y_val)
+    x_le = x_leading_edge_at(y_val)
+    zeta = 2.0 * z_ref
+    half_t = chord * naca_half_thickness(xi)
+    coords[i, 0] = x_le + xi * chord
+    coords[i, 2] = zeta * half_t
 
 def left(x, on_boundary):
     return near(x[1], 0.) and on_boundary
@@ -26,13 +66,23 @@ def right(x, on_boundary):
 facet_markers = MeshFunction("size_t", mesh, mesh.topology().dim() - 1)
 facet_markers.set_all(0)
 
-x_34 = 0.75*x
-hx = x/nx
-hz = z/nz
+panel_tol_x = 0.75 * (root_chord / nx)
+panel_tol_z = 1.25 * (root_chord * thickness_ratio / nz)
 
 class AeroSurface(SubDomain):
     def inside(self, X, on_boundary):
-        return on_boundary and near(X[0], x_34, 0.5*hx) and near(X[2], 0.0, 0.5*hz)
+        if not on_boundary:
+            return False
+        y_val = X[1]
+        chord = chord_at(y_val)
+        if chord <= 0.0:
+            return False
+        x_le = x_leading_edge_at(y_val)
+        xi = (X[0] - x_le) / chord
+        if xi < -0.02 or xi > 1.02:
+            return False
+        z_surf = chord * naca_half_thickness(xi)
+        return abs(abs(X[2]) - z_surf) <= panel_tol_z
 
 aero_surface = AeroSurface()
 aero_surface.mark(facet_markers, 5)
@@ -141,12 +191,35 @@ K, _ = assemble_system(a_form, L_form, bc)
 solver = LUSolver(K, "mumps")
 solver.parameters["symmetric"] = True
 
+strip_node_cache = {}
+
+
+def get_strip_node_ids(n_strips):
+    if n_strips in strip_node_cache:
+        return strip_node_cache[n_strips]
+
+    Vscalar = Vt.sub(0).collapse()
+    coords = Vscalar.tabulate_dof_coordinates().reshape((-1, 3))
+    panel_node_ids = [[] for _ in range(n_strips)]
+
+    for i, X in enumerate(coords):
+        y_val = X[1]
+        eta = np.clip(y_val / span, 0.0, 1.0)
+        panel_idx = min(int(eta * n_strips), n_strips - 1)
+        chord = chord_at(y_val)
+        x_le = x_leading_edge_at(y_val)
+        x_cp = x_le + 0.75 * chord
+        xi = (X[0] - x_le) / max(chord, 1e-12)
+        z_surf = chord * naca_half_thickness(xi)
+        if abs(X[0] - x_cp) <= panel_tol_x and abs(abs(X[2]) - z_surf) <= panel_tol_z:
+            panel_node_ids[panel_idx].append(i)
+
+    strip_node_cache[n_strips] = panel_node_ids
+    return panel_node_ids
+
 def update_aero_traction(t_aero, forces):
     vec = t_aero.vector()
     vec.zero()
-
-    tolx = 0.6*(x/nx)
-    tolz = 0.6*(z/nz)
 
     Vscalar = Vt.sub(0).collapse()
     coords = Vscalar.tabulate_dof_coordinates().reshape((-1,3))
@@ -156,17 +229,39 @@ def update_aero_traction(t_aero, forces):
     dofs_z = Vt.sub(2).dofmap().dofs()
 
     m_panels = len(forces)
+    panel_node_ids = get_strip_node_ids(m_panels)
 
-    for i, X in enumerate(coords):
-        if abs(X[0]-x_34)<tolx and abs(X[2])<tolz:
-            eta = np.clip(X[1],0.0,1.0)
-            idx = int(eta*(m_panels-1))
-            fx, fy, fz = forces[idx]
-            vec[dofs_x[i]] = fx
-            vec[dofs_y[i]] = fy
-            vec[dofs_z[i]] = fz
+    for panel_idx, ids in enumerate(panel_node_ids):
+        if not ids:
+            continue
+        fx, fy, fz = forces[panel_idx]
+        scale = 1.0 / len(ids)
+        for i in ids:
+            vec[dofs_x[i]] += scale * fx
+            vec[dofs_y[i]] += scale * fy
+            vec[dofs_z[i]] += scale * fz
 
     vec.apply("insert")
+
+
+def extract_three_quarter_chord_nodes(n_panels):
+    Vscalar = Vt.sub(0).collapse()
+    coords = Vscalar.tabulate_dof_coordinates().reshape((-1, 3))
+    nodes = []
+    for j in range(n_panels):
+        y_target = (j + 0.5) * span / n_panels
+        chord = chord_at(y_target)
+        x_target = x_leading_edge_at(y_target) + 0.75 * chord
+        z_target = chord * naca_half_thickness(0.75)
+        best_idx = None
+        best_d2 = None
+        for i, X in enumerate(coords):
+            d2 = (X[0] - x_target)**2 + (X[1] - y_target)**2 + (abs(X[2]) - z_target)**2
+            if best_d2 is None or d2 < best_d2:
+                best_d2 = d2
+                best_idx = i
+        nodes.append(coords[best_idx].tolist())
+    return nodes
 
 def local_project(v, V, u=None):
     dv = TrialFunction(V)
@@ -198,7 +293,9 @@ sock_file = sock.makefile("r")
 print("Solid connected.")
 
 # Communication discretization (must match fluid panel count)
-m_panels_comm = 100
+m_panels_comm = span_strips
+cp_nodes = extract_three_quarter_chord_nodes(m_panels_comm)
+np.savetxt(os.path.join(out_dir, "three_quarter_chord_nodes.csv"), np.array(cp_nodes), delimiter=",", header="x,y,z", comments="")
 u_cp0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
 sock.sendall((json.dumps({"step": 0, "geometry": u_cp0}) + "\n").encode())
 print("Initial geometry sent.")
@@ -257,10 +354,10 @@ for i in range(Nsteps):
     if i < Nsteps - 1:
         m_panels = len(forces_eff)
         u_cp = []
-        denom = max(m_panels - 1, 1)
         for j in range(m_panels):
-            eta = j/denom
-            ux, uy, uz = u(x_34, eta, 0.0)
+            y_cp = (j + 0.5) * span / m_panels
+            x_cp = x_leading_edge_at(y_cp) + 0.75 * chord_at(y_cp)
+            ux, uy, uz = u(x_cp, y_cp, 0.0)
             u_cp.append([float(ux), float(uy), float(uz)])
 
         msg_geo = json.dumps({

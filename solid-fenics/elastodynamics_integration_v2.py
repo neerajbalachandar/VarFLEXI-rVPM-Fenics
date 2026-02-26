@@ -116,6 +116,8 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0)
 # will be represented by the Function ``u``. Displacement, velocity and acceleration fields of the previous increment
 # :math:`t_n` will respectively be represented by functions ``u_old``, ``v_old`` and ``a_old``::
 
+
+
 # Test and trial functions
 du = TrialFunction(V)
 u_ = TestFunction(V)
@@ -404,30 +406,6 @@ for (i, dt) in enumerate(np.diff(time)):
     E_tot = E_elas+E_kin+E_damp #-E_ext
     energies[i+1, :] = np.array([E_elas, E_kin, E_damp, E_tot])
 
-# Note that in the above, the stresses are computed using a ``LocalSolver`` through the ``local_project`` function. Since the stress function space
-# is a DG-0 space, the projection on this space can be performed element-wise in a very efficient manner. We therefore take advantage of the ``LocalSolver``
-# functionality which is precisely dedicated to such situations. Since this projection is performed at each time step, the savings in terms of computing
-# time can be quite important.
-#
-# As regards the computation of the various energies, the elastic and kinetic energies are respectively given by:
-#
-# .. math::
-#    E_{elas} = \int_{\Omega} \dfrac{1}{2}\sigma(u):\varepsilon(u) \, {\rm d} x
-# .. math::
-#    E_{kin} = \int_{\Omega} \dfrac{1}{2}\rho \dot{u}\cdot\dot{u} \, {\rm d} x
-#
-# which are readily computed from the respective stiffness and mass forms ``k`` and ``m`` and the current displacement and velocity. The energy related to damping
-# is computed from the corresponding dissipation term :math:`\mathcal{D}=c(\dot{u},\dot{u})` and integrated over time:
-#
-# .. math::
-#    E_{damp} = \int_0^T \mathcal{D} \, {\rm d} t
-#
-# As for the work developed by the external forces, the contribution to the energy is added at each time step. Finally, the total energy of the sytem is given by:
-#
-# .. math::
-#    E_{tot} = E_{elas}+E_{kin}+E_{damp}-E_{ext}
-#
-# When the time evolution loop is finished, the evolution of the tip displacement as well as the different contributions of the energy are plotted as functions of time::
 
 # Plot tip displacement evolution
 plt.figure()
