@@ -1,4 +1,4 @@
-# Airfoil geometry with updated geometry inclusion from fluid, needs correction! 
+# Airfoil geometry with the new meshing and mapping and features chordwise and spanwise discretization
 
 from dolfin import *
 import numpy as np
@@ -25,7 +25,11 @@ nx, ny, nz = 32, 200, 8
 mesh = BoxMesh(Point(0.0, 0.0, -0.5), Point(1.0, span, 0.5), nx, ny, nz)
 span_strips = 200
 # Must match fluid-side panel count (fluid-rvpm/fluid_explicit_vpm.jl with n=50 -> m=100)
-m_panels_comm = 100
+n_span_comm = 100
+n_chord_comm = 5
+m_panels_comm = n_span_comm * n_chord_comm
+eta_span_comm = np.linspace(0.0, 1.0, n_span_comm)
+eta_chord_comm = np.linspace(0.0, 1.0, n_chord_comm)
 
 
 def chord_at(y_val):
@@ -197,94 +201,225 @@ K, _ = assemble_system(a_form, L_form, bc)
 solver = LUSolver(K, "mumps")
 solver.parameters["symmetric"] = True
 
-strip_node_cache = {}
+panel_node_cache = {}
+coupling_node_cache = {}
 
 
-def get_strip_node_ids(n_strips):
-    if n_strips in strip_node_cache:
-        return strip_node_cache[n_strips]
+def as_eta_array(values, n):
+    if values is None:
+        return np.linspace(0.0, 1.0, n)
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if len(arr) != n:
+        return np.linspace(0.0, 1.0, n)
+    if n > 1:
+        arr = np.clip(arr, 0.0, 1.0)
+        arr = np.maximum.accumulate(arr)
+        if arr[-1] > 0.0:
+            arr = arr / arr[-1]
+    return arr
+
+
+def interp_profile(x_src, vals_src, x_dst):
+    x_src = np.asarray(x_src, dtype=float).reshape(-1)
+    vals_src = np.asarray(vals_src, dtype=float)
+    x_dst = np.asarray(x_dst, dtype=float).reshape(-1)
+    if vals_src.ndim == 1:
+        vals_src = vals_src.reshape(-1, 1)
+    if len(x_src) == 0 or vals_src.shape[0] == 0:
+        return np.zeros((len(x_dst), vals_src.shape[1]), dtype=float)
+    if len(x_src) == 1:
+        return np.repeat(vals_src[:1, :], len(x_dst), axis=0)
+    out = np.zeros((len(x_dst), vals_src.shape[1]), dtype=float)
+    for c in range(vals_src.shape[1]):
+        out[:, c] = np.interp(x_dst, x_src, vals_src[:, c])
+    return out
+
+
+def resample_forces_to_shape(forces, n_span_out, n_chord_out,
+                             eta_span_in=None, eta_chord_in=None,
+                             eta_span_out=None, eta_chord_out=None):
+    forces = np.asarray(forces, dtype=float).reshape(-1, 3)
+    n_out = n_span_out * n_chord_out
+    if len(forces) == 0:
+        return np.zeros((n_out, 3), dtype=float)
+
+    eta_span_out = as_eta_array(eta_span_out, n_span_out)
+    eta_chord_out = as_eta_array(eta_chord_out, n_chord_out)
+
+    n_in = len(forces)
+    if eta_span_in is None or eta_chord_in is None:
+        if n_in == n_out:
+            return forces
+        if n_in == 1:
+            return np.repeat(forces[:1], n_out, axis=0)
+        s_in = np.linspace(0.0, 1.0, n_in)
+        s_out = np.linspace(0.0, 1.0, n_out)
+        return interp_profile(s_in, forces, s_out)
+
+    eta_span_in = np.asarray(eta_span_in, dtype=float).reshape(-1)
+    eta_chord_in = np.asarray(eta_chord_in, dtype=float).reshape(-1)
+    n_span_in = len(eta_span_in)
+    n_chord_in = len(eta_chord_in)
+    if n_span_in == 0 or n_chord_in == 0:
+        return np.zeros((n_out, 3), dtype=float)
+    if n_in != n_span_in * n_chord_in:
+        return resample_forces_to_shape(forces, n_span_out, n_chord_out)
+
+    grid_in = forces.reshape((n_span_in, n_chord_in, 3))
+    eta_span_in = as_eta_array(eta_span_in, n_span_in)
+    eta_chord_in = as_eta_array(eta_chord_in, n_chord_in)
+
+    grid_span = np.zeros((n_span_out, n_chord_in, 3), dtype=float)
+    for j in range(n_chord_in):
+        grid_span[:, j, :] = interp_profile(eta_span_in, grid_in[:, j, :], eta_span_out)
+
+    grid_out = np.zeros((n_span_out, n_chord_out, 3), dtype=float)
+    for i in range(n_span_out):
+        grid_out[i, :, :] = interp_profile(eta_chord_in, grid_span[i, :, :], eta_chord_out)
+
+    return grid_out.reshape((n_out, 3))
+
+
+def get_panel_node_ids(n_span, n_chord, eta_chord):
+    eta_chord = as_eta_array(eta_chord, n_chord)
+    key = (n_span, n_chord, tuple(np.round(eta_chord, 8)))
+    if key in panel_node_cache:
+        return panel_node_cache[key]
 
     Vscalar = Vt.sub(0).collapse()
     coords = Vscalar.tabulate_dof_coordinates().reshape((-1, 3))
-    panel_node_ids = [[] for _ in range(n_strips)]
+    panel_node_ids = [[] for _ in range(n_span * n_chord)]
+    aero_ids = []
 
-    for i, X in enumerate(coords):
+    for i_node, X in enumerate(coords):
         y_val = X[1]
-        eta = np.clip(y_val / span, 0.0, 1.0)
-        panel_idx = min(int(eta * n_strips), n_strips - 1)
         chord = chord_at(y_val)
+        if chord <= 0.0:
+            continue
         x_le = x_leading_edge_at(y_val)
-        x_cp = x_le + 0.75 * chord
         xi = (X[0] - x_le) / max(chord, 1e-12)
+        if xi < -0.02 or xi > 1.02:
+            continue
         z_surf = chord * naca_half_thickness(xi)
-        if abs(X[0] - x_cp) <= panel_tol_x and abs(abs(X[2]) - z_surf) <= panel_tol_z:
-            panel_node_ids[panel_idx].append(i)
+        if abs(abs(X[2]) - z_surf) > panel_tol_z:
+            continue
+        aero_ids.append(i_node)
 
-    strip_node_cache[n_strips] = panel_node_ids
+        eta_s = np.clip(y_val / span, 0.0, 1.0)
+        i_span = min(int(eta_s * n_span), n_span - 1)
+        j_chord = int(np.argmin(np.abs(eta_chord - xi)))
+        x_target = x_le + eta_chord[j_chord] * chord
+        if abs(X[0] - x_target) <= panel_tol_x:
+            panel_idx = i_span * n_chord + j_chord
+            panel_node_ids[panel_idx].append(i_node)
+
+    for i_span in range(n_span):
+        y_target = (i_span + 0.5) * span / n_span
+        chord = chord_at(y_target)
+        x_le = x_leading_edge_at(y_target)
+        for j_chord in range(n_chord):
+            panel_idx = i_span * n_chord + j_chord
+            if panel_node_ids[panel_idx]:
+                continue
+            xi_target = eta_chord[j_chord]
+            x_target = x_le + xi_target * chord
+            z_target = chord * naca_half_thickness(xi_target)
+            best_idx = None
+            best_d2 = None
+            search_ids = aero_ids if aero_ids else range(len(coords))
+            for i_node in search_ids:
+                X = coords[i_node]
+                d2 = (X[0] - x_target) ** 2 + (X[1] - y_target) ** 2 + (abs(X[2]) - z_target) ** 2
+                if best_d2 is None or d2 < best_d2:
+                    best_d2 = d2
+                    best_idx = i_node
+            if best_idx is not None:
+                panel_node_ids[panel_idx].append(best_idx)
+
+    panel_node_cache[key] = panel_node_ids
     return panel_node_ids
 
-def update_aero_traction(t_aero, forces):
+
+def update_aero_traction(t_aero, forces, n_span, n_chord, eta_chord):
     vec = t_aero.vector()
     vec.zero()
-
-    Vscalar = Vt.sub(0).collapse()
-    coords = Vscalar.tabulate_dof_coordinates().reshape((-1,3))
 
     dofs_x = Vt.sub(0).dofmap().dofs()
     dofs_y = Vt.sub(1).dofmap().dofs()
     dofs_z = Vt.sub(2).dofmap().dofs()
 
-    m_panels = len(forces)
-    panel_node_ids = get_strip_node_ids(m_panels)
-
+    panel_node_ids = get_panel_node_ids(n_span, n_chord, eta_chord)
     for panel_idx, ids in enumerate(panel_node_ids):
         if not ids:
             continue
         fx, fy, fz = forces[panel_idx]
         scale = 1.0 / len(ids)
-        for i in ids:
-            vec[dofs_x[i]] += scale * fx
-            vec[dofs_y[i]] += scale * fy
-            vec[dofs_z[i]] += scale * fz
+        for i_node in ids:
+            vec[dofs_x[i_node]] += scale * fx
+            vec[dofs_y[i_node]] += scale * fy
+            vec[dofs_z[i_node]] += scale * fz
 
     vec.apply("insert")
 
 
-def extract_three_quarter_chord_nodes(n_panels):
+def extract_coupling_nodes(n_span, n_chord, eta_chord):
+    eta_chord = as_eta_array(eta_chord, n_chord)
+    key = (n_span, n_chord, tuple(np.round(eta_chord, 8)))
+    if key in coupling_node_cache:
+        return coupling_node_cache[key]
+
     Vscalar = Vt.sub(0).collapse()
     coords = Vscalar.tabulate_dof_coordinates().reshape((-1, 3))
     nodes = []
-    for j in range(n_panels):
-        y_target = (j + 0.5) * span / n_panels
+
+    for i_span in range(n_span):
+        y_target = (i_span + 0.5) * span / n_span
         chord = chord_at(y_target)
-        x_target = x_leading_edge_at(y_target) + 0.75 * chord
-        z_target = chord * naca_half_thickness(0.75)
-        best_idx = None
-        best_d2 = None
-        for i, X in enumerate(coords):
-            d2 = (X[0] - x_target)**2 + (X[1] - y_target)**2 + (abs(X[2]) - z_target)**2
-            if best_d2 is None or d2 < best_d2:
-                best_d2 = d2
-                best_idx = i
-        nodes.append(coords[best_idx].tolist())
+        x_le = x_leading_edge_at(y_target)
+        for j_chord in range(n_chord):
+            xi_target = eta_chord[j_chord]
+            x_target = x_le + xi_target * chord
+            z_target = chord * naca_half_thickness(xi_target)
+
+            best_idx = None
+            best_d2 = None
+            for i_node, X in enumerate(coords):
+                d2 = (X[0] - x_target) ** 2 + (X[1] - y_target) ** 2 + (abs(X[2]) - z_target) ** 2
+                if best_d2 is None or d2 < best_d2:
+                    best_d2 = d2
+                    best_idx = i_node
+            nodes.append(coords[best_idx].tolist())
+
+    coupling_node_cache[key] = nodes
     return nodes
 
-def resample_forces_to_panels(forces, n_panels):
-    forces = np.asarray(forces, dtype=float)
-    n_in = len(forces)
-    if n_in == n_panels:
-        return forces
-    if n_in <= 1:
-        return np.repeat(forces[:1], n_panels, axis=0)
 
-    out = np.zeros((n_panels, 3), dtype=float)
-    for i in range(n_panels):
-        s = (i * (n_in - 1)) / max(n_panels - 1, 1)
-        i0 = int(np.floor(s))
-        i1 = int(np.ceil(s))
-        w = s - i0
-        out[i, :] = (1.0 - w) * forces[i0, :] + w * forces[i1, :]
-    return out
+def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_out):
+    eta_span_out = as_eta_array(eta_span_out, n_span_out)
+    eta_chord_out = as_eta_array(eta_chord_out, n_chord_out)
+
+    if "n_span" in data and "n_chord" in data and "force" in data:
+        n_span_in = int(data.get("n_span", 0))
+        n_chord_in = int(data.get("n_chord", 0))
+        force_raw = np.asarray(data.get("force", []), dtype=float).reshape(-1, 3)
+        eta_span_in = as_eta_array(data.get("eta_span"), n_span_in) if n_span_in > 0 else None
+        eta_chord_in = as_eta_array(data.get("eta_chord"), n_chord_in) if n_chord_in > 0 else None
+        if n_span_in > 0 and n_chord_in > 0:
+            forces = resample_forces_to_shape(
+                force_raw,
+                n_span_out, n_chord_out,
+                eta_span_in=eta_span_in, eta_chord_in=eta_chord_in,
+                eta_span_out=eta_span_out, eta_chord_out=eta_chord_out
+            )
+            return forces, True
+
+    forces_legacy = np.asarray(data.get("force", []), dtype=float).reshape(-1, 3)
+    forces = resample_forces_to_shape(
+        forces_legacy,
+        n_span_out, n_chord_out,
+        eta_span_out=eta_span_out, eta_chord_out=eta_chord_out
+    )
+    return forces, False
 
 def local_project(v, V, u=None):
     dv = TrialFunction(V)
@@ -318,11 +453,17 @@ sock.sendall((json.dumps({"role": "solid"}) + "\n").encode())
 print("Solid connected.")
 
 # Communication discretization (must match fluid panel count)
-cp_nodes = extract_three_quarter_chord_nodes(m_panels_comm)
-panel_eta_comm = [(j + 0.5) / m_panels_comm for j in range(m_panels_comm)]
-np.savetxt(os.path.join(out_dir, "three_quarter_chord_nodes.csv"), np.array(cp_nodes), delimiter=",", header="x,y,z", comments="")
+cp_nodes = extract_coupling_nodes(n_span_comm, n_chord_comm, eta_chord_comm)
+np.savetxt(os.path.join(out_dir, "coupling_nodes.csv"), np.array(cp_nodes), delimiter=",", header="x,y,z", comments="")
 u_cp0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
-sock.sendall((json.dumps({"step": 0, "geometry": u_cp0, "eta": panel_eta_comm}) + "\n").encode())
+sock.sendall((json.dumps({
+    "step": 0,
+    "n_span": n_span_comm,
+    "n_chord": n_chord_comm,
+    "eta_span": eta_span_comm.tolist(),
+    "eta_chord": eta_chord_comm.tolist(),
+    "geometry": u_cp0
+}) + "\n").encode())
 print("Initial geometry sent.")
 
 time = np.linspace(0, T, Nsteps+1)
@@ -339,13 +480,22 @@ for i in range(Nsteps):
     if line == "":
         raise RuntimeError("Coupling server disconnected while sending force data")
     data = json.loads(line)
-    #what is force here?? need to take a look at the .json files being written
-    forces = np.array(data["force"])
+    forces, used_2d_force = parse_force_payload(
+        data, n_span_comm, n_chord_comm, eta_span_comm, eta_chord_comm
+    )
     if not np.isfinite(forces).all():
         raise RuntimeError(f"Non-finite force data at solid step {i+1}")
     if len(forces) != m_panels_comm:
         print(f"Solid step {i+1}/{Nsteps}: force count mismatch (got {len(forces)}, expected {m_panels_comm}), resampling.")
-        forces = resample_forces_to_panels(forces, m_panels_comm)
+        forces = resample_forces_to_shape(
+            forces, n_span_comm, n_chord_comm,
+            eta_span_out=eta_span_comm, eta_chord_out=eta_chord_comm
+        )
+    if i == 0:
+        if used_2d_force:
+            print(f"Solid: received 2D force payload ({n_span_comm}x{n_chord_comm})")
+        else:
+            print("Solid: received legacy spanwise force payload and remapped to 2D grid")
 
     if forces_prev is None:
         forces_eff = forces.copy()
@@ -355,7 +505,7 @@ for i in range(Nsteps):
         forces_eff = force_relax*forces + (1.0-force_relax)*forces_prev
     forces_prev = forces_eff.copy()
 
-    update_aero_traction(t_aero, forces_eff)
+    update_aero_traction(t_aero, forces_eff, n_span_comm, n_chord_comm, eta_chord_comm)
 
     rhs_vec = assemble(L_form)
     bc.apply(rhs_vec)
@@ -383,12 +533,10 @@ for i in range(Nsteps):
     energies[i+1,:] = np.array([E_elas,E_kin,E_damp,E_tot])
     u_tip[i+1] = u(0.05,1.0,0.0)[1]
 
-    # Send geometry for the next fluid step (not needed after final force)
-    # need to check message passing and all the .json files and verify
+    # Send geometry for the next fluid step (not needed after final force).
     if i < Nsteps - 1:
-        m_panels = m_panels_comm
         u_cp = []
-        for j in range(m_panels):
+        for j in range(m_panels_comm):
             x_cp, y_cp, z_cp = cp_nodes[j]
             try:
                 ux, uy, uz = u(x_cp, y_cp, z_cp)
@@ -403,8 +551,11 @@ for i in range(Nsteps):
 
         msg_geo = json.dumps({
             "step": i + 1,
-            "geometry": u_cp,
-            "eta": panel_eta_comm
+            "n_span": n_span_comm,
+            "n_chord": n_chord_comm,
+            "eta_span": eta_span_comm.tolist(),
+            "eta_chord": eta_chord_comm.tolist(),
+            "geometry": u_cp
         })
         sock.sendall((msg_geo + "\n").encode())
         print(f"Solid step {i+1}/{Nsteps}: geometry sent.")

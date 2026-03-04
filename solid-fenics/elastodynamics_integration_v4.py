@@ -1,3 +1,5 @@
+# Airfoil geometry with the new meshing and mapping
+
 from dolfin import *
 import numpy as np
 import matplotlib.pyplot as plt
@@ -300,7 +302,7 @@ def local_project(v, V, u=None):
 
 sig = Function(Vsig, name="sigma")
 #change after this run
-out_dir = "solid-fenics/results"
+out_dir = "../results"
 os.makedirs(out_dir, exist_ok=True)
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
 xdmf_file = XDMFFile(xdmf_path)
