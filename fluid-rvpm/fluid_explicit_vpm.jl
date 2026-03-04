@@ -197,6 +197,8 @@ end
 println("Connecting to coupling server...")
 sock = connect("127.0.0.1", 9000)
 println("Fluid connected.")
+write(sock, JSON.json(Dict("role"=>"fluid")) * "\n")
+flush(sock)
 
 m_global = vlm.get_m(wing)
 u_cp_prev = zeros(Float64, m_global, 3)
@@ -215,13 +217,40 @@ for step in 1:nsteps
     msg = JSON.parse(String(readline(sock)))
     geo = msg["geometry"]
     m = vlm.get_m(wing)
-    @assert length(geo) == m
+
+    ng = length(geo)
+    if ng == 0
+        error("Received empty geometry array from coupling")
+    end
 
     u_cp_raw = zeros(Float64, m, 3)
-    for i in 1:m
-        u_cp_raw[i,1] = Float64(geo[i][1])
-        u_cp_raw[i,2] = Float64(geo[i][2])
-        u_cp_raw[i,3] = Float64(geo[i][3])
+    if ng == m
+        for i in 1:m
+            u_cp_raw[i,1] = Float64(geo[i][1])
+            u_cp_raw[i,2] = Float64(geo[i][2])
+            u_cp_raw[i,3] = Float64(geo[i][3])
+        end
+    else
+        @warn "Geometry panel count mismatch (solid=$ng, fluid=$m). Resampling."
+        if ng == 1
+            for i in 1:m
+                u_cp_raw[i,1] = Float64(geo[1][1])
+                u_cp_raw[i,2] = Float64(geo[1][2])
+                u_cp_raw[i,3] = Float64(geo[1][3])
+            end
+        else
+            for i in 1:m
+                s = 1 + (i-1) * (ng-1) / max(m-1, 1)
+                i0 = floor(Int, s)
+                i1 = ceil(Int, s)
+                w = s - i0
+                for k in 1:3
+                    v0 = Float64(geo[i0][k])
+                    v1 = Float64(geo[i1][k])
+                    u_cp_raw[i,k] = (1-w)*v0 + w*v1
+                end
+            end
+        end
     end
     u_cp_raw[:,1] .*= disp_scale_x
     u_cp_raw[:,2] .*= disp_scale_y

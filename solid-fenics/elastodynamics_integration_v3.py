@@ -195,6 +195,7 @@ print("Connecting solid to coupling server...")
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.connect(("127.0.0.1", 9000))
 sock_file = sock.makefile("r")
+sock.sendall((json.dumps({"role": "solid"}) + "\n").encode())
 print("Solid connected.")
 
 # Communication discretization (must match fluid panel count)

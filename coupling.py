@@ -10,6 +10,25 @@ def read_json_line(stream, name):
         raise RuntimeError(f"{name} disconnected or sent empty line")
     return json.loads(line)
 
+def accept_role(server, fluid_conn, fluid_file, solid_conn, solid_file):
+    conn, addr = server.accept()
+    stream = conn.makefile("r")
+    hello = read_json_line(stream, f"Client@{addr}")
+    role = str(hello.get("role", "")).strip().lower()
+
+    if role == "fluid":
+        if fluid_conn is not None:
+            raise RuntimeError("Duplicate fluid connection")
+        print(f"Fluid connected from {addr}.")
+        return conn, stream, solid_conn, solid_file
+    if role == "solid":
+        if solid_conn is not None:
+            raise RuntimeError("Duplicate solid connection")
+        print(f"Solid connected from {addr}.")
+        return fluid_conn, fluid_file, conn, stream
+
+    raise RuntimeError(f"Client {addr} must send role handshake {{\"role\":\"fluid\"|\"solid\"}}")
+
 print("Starting coupling server...")
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -17,15 +36,14 @@ server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind((HOST, PORT))
 server.listen(2)
 
-print("Waiting for fluid...")
-fluid_conn, _ = server.accept()
-fluid_file = fluid_conn.makefile("r")
-print("Fluid connected.")
-
-print("Waiting for solid...")
-solid_conn, _ = server.accept()
-solid_file = solid_conn.makefile("r")
-print("Solid connected.")
+fluid_conn, fluid_file = None, None
+solid_conn, solid_file = None, None
+print("Waiting for fluid and solid role handshakes...")
+while fluid_conn is None or solid_conn is None:
+    fluid_conn, fluid_file, solid_conn, solid_file = accept_role(
+        server, fluid_conn, fluid_file, solid_conn, solid_file
+    )
+print("Both participants connected.")
 
 nsteps = 200
 

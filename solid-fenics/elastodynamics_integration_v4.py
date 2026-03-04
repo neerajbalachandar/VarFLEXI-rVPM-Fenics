@@ -22,6 +22,8 @@ leading_edge_sweep = 0.0
 nx, ny, nz = 32, 200, 8
 mesh = BoxMesh(Point(0.0, 0.0, -0.5), Point(1.0, span, 0.5), nx, ny, nz)
 span_strips = 200
+# Must match fluid-side panel count (fluid-rvpm/fluid_explicit_vpm.jl with n=50 -> m=100)
+m_panels_comm = 100
 
 
 def chord_at(y_val):
@@ -46,14 +48,16 @@ def naca_half_thickness(xi):
 
 
 coords = mesh.coordinates()
+min_half_t = 0.10 * root_chord * thickness_ratio / nz
 for i in range(coords.shape[0]):
-    xi = coords[i, 0]
+    # Keep xi away from exactly 0 to avoid zero-thickness leading-edge collapse.
+    xi = min(max(coords[i, 0], 1.0e-4), 1.0)
     y_val = coords[i, 1]
     z_ref = coords[i, 2]
     chord = chord_at(y_val)
     x_le = x_leading_edge_at(y_val)
     zeta = 2.0 * z_ref
-    half_t = chord * naca_half_thickness(xi)
+    half_t = max(chord * naca_half_thickness(xi), min_half_t)
     coords[i, 0] = x_le + xi * chord
     coords[i, 2] = zeta * half_t
 
@@ -263,6 +267,23 @@ def extract_three_quarter_chord_nodes(n_panels):
         nodes.append(coords[best_idx].tolist())
     return nodes
 
+def resample_forces_to_panels(forces, n_panels):
+    forces = np.asarray(forces, dtype=float)
+    n_in = len(forces)
+    if n_in == n_panels:
+        return forces
+    if n_in <= 1:
+        return np.repeat(forces[:1], n_panels, axis=0)
+
+    out = np.zeros((n_panels, 3), dtype=float)
+    for i in range(n_panels):
+        s = (i * (n_in - 1)) / max(n_panels - 1, 1)
+        i0 = int(np.floor(s))
+        i1 = int(np.ceil(s))
+        w = s - i0
+        out[i, :] = (1.0 - w) * forces[i0, :] + w * forces[i1, :]
+    return out
+
 def local_project(v, V, u=None):
     dv = TrialFunction(V)
     v_ = TestFunction(V)
@@ -290,10 +311,10 @@ print("Connecting solid to coupling server...")
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.connect(("127.0.0.1", 9000))
 sock_file = sock.makefile("r")
+sock.sendall((json.dumps({"role": "solid"}) + "\n").encode())
 print("Solid connected.")
 
 # Communication discretization (must match fluid panel count)
-m_panels_comm = span_strips
 cp_nodes = extract_three_quarter_chord_nodes(m_panels_comm)
 np.savetxt(os.path.join(out_dir, "three_quarter_chord_nodes.csv"), np.array(cp_nodes), delimiter=",", header="x,y,z", comments="")
 u_cp0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
@@ -318,6 +339,9 @@ for i in range(Nsteps):
     forces = np.array(data["force"])
     if not np.isfinite(forces).all():
         raise RuntimeError(f"Non-finite force data at solid step {i+1}")
+    if len(forces) != m_panels_comm:
+        print(f"Solid step {i+1}/{Nsteps}: force count mismatch (got {len(forces)}, expected {m_panels_comm}), resampling.")
+        forces = resample_forces_to_panels(forces, m_panels_comm)
 
     if forces_prev is None:
         forces_eff = forces.copy()
@@ -331,7 +355,13 @@ for i in range(Nsteps):
 
     rhs_vec = assemble(L_form)
     bc.apply(rhs_vec)
-    solver.solve(K, u.vector(), rhs_vec)
+    try:
+        solver.solve(K, u.vector(), rhs_vec)
+    except RuntimeError as err:
+        print(f"Primary linear solve failed at solid step {i+1}/{Nsteps}: {err}")
+        print("Retrying with freshly assembled matrix and direct LU.")
+        K_retry, _ = assemble_system(a_form, L_form, bc)
+        solve(K_retry, u.vector(), rhs_vec, "lu")
 
     update_fields(u, u_old, v_old, a_old)
 
@@ -352,12 +382,19 @@ for i in range(Nsteps):
     # Send geometry for the next fluid step (not needed after final force)
     # need to check message passing and all the .json files and verify
     if i < Nsteps - 1:
-        m_panels = len(forces_eff)
+        m_panels = m_panels_comm
         u_cp = []
         for j in range(m_panels):
-            y_cp = (j + 0.5) * span / m_panels
-            x_cp = x_leading_edge_at(y_cp) + 0.75 * chord_at(y_cp)
-            ux, uy, uz = u(x_cp, y_cp, 0.0)
+            x_cp, y_cp, z_cp = cp_nodes[j]
+            try:
+                ux, uy, uz = u(x_cp, y_cp, z_cp)
+            except RuntimeError:
+                # Fallback to the local mid-surface if exact point lookup fails.
+                try:
+                    ux, uy, uz = u(x_cp, y_cp, 0.0)
+                except RuntimeError:
+                    print(f"Solid step {i+1}/{Nsteps}: failed displacement lookup at panel {j}, using zeros.")
+                    ux, uy, uz = 0.0, 0.0, 0.0
             u_cp.append([float(ux), float(uy), float(uz)])
 
         msg_geo = json.dumps({

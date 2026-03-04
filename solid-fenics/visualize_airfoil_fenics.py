@@ -37,7 +37,26 @@ def naca_half_thickness(xi):
     )
 
 
-mesh = BoxMesh(Point(0.0, 0.0, -0.5), Point(1.0, span, 0.5), nx, ny, nz)
+mesh = BoxMesh(Point(0.0, 0.0, -0.5), Point(1\section{Validation, Computation and Results}
+￼
+\begin{frame}{Results}
+￼
+\centering
+\textbf{Tip Displacement}
+￼
+\vspace{0.1cm}
+￼
+\includegraphics[width=0.35\linewidth]{images/tip_disp_v3.png}
+￼
+\vspace{0.1cm}
+￼
+\textbf{Energy Evolution}
+￼
+\vspace{0.1cm}
+￼
+\includegraphics[width=0.85\linewidth]{images/energy_v3.png}
+￼
+\end{frame}.0, span, 0.5), nx, ny, nz)
 coords = mesh.coordinates()
 for i in range(coords.shape[0]):
     xi = coords[i, 0]
