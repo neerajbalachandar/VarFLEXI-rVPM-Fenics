@@ -15,6 +15,7 @@ dt = Constant(dt_value)
 
 x, y, z = 0.1, 1.0, 0.01
 nx, ny, nz = 10, 200, 5
+#how to visualize meshes?
 mesh = BoxMesh(Point(0., 0., 0.), Point(x, y, z), nx, ny, nz)
 
 def left(x, on_boundary):
@@ -23,13 +24,16 @@ def left(x, on_boundary):
 def right(x, on_boundary):
     return near(x[1], 1.) and on_boundary
 
+#where do you define MeshFunction - dolfin?
 facet_markers = MeshFunction("size_t", mesh, mesh.topology().dim() - 1)
 facet_markers.set_all(0)
 
+#what is x_34?
 x_34 = 0.75*x
 hx = x/nx
 hz = z/nz
 
+#why do we use AeroSurface as a class for a simple beam?
 class AeroSurface(SubDomain):
     def inside(self, X, on_boundary):
         return on_boundary and near(X[0], x_34, 0.5*hx) and near(X[2], 0.0, 0.5*hz)
@@ -41,6 +45,7 @@ ds_aero = Measure("ds", domain=mesh, subdomain_data=facet_markers)
 
 V = VectorFunctionSpace(mesh, "CG", 1)
 Vt = VectorFunctionSpace(mesh, "CG", 1)
+# the result appearing as sigma is Vsig
 Vsig = TensorFunctionSpace(mesh, "DG", 0)
 
 t_aero = Function(Vt, name="AerodynamicTraction")
@@ -129,6 +134,7 @@ def avg(x_old, x_new, alpha):
 a_new = update_a(du, u_old, v_old, a_old, ufl=True)
 v_new = update_v(a_new, u_old, v_old, a_old, ufl=True)
 
+#residuals computation
 res = m(avg(a_old, a_new, alpha_m), u_) \
     + c(avg(v_old, v_new, alpha_f), u_) \
     + k(avg(u_old, du, alpha_f), u_) \
@@ -137,10 +143,12 @@ res = m(avg(a_old, a_new, alpha_m), u_) \
 a_form = lhs(res)
 L_form = rhs(res)
 
+#assmebling the matrix
 K, _ = assemble_system(a_form, L_form, bc)
 solver = LUSolver(K, "mumps")
 solver.parameters["symmetric"] = True
 
+#Updating function for traction
 def update_aero_traction(t_aero, forces):
     vec = t_aero.vector()
     vec.zero()
@@ -182,8 +190,9 @@ def local_project(v, V, u=None):
     else:
         solver.solve_local_rhs(u)
 
+# Check out what does Vsig indicate in a solver
 sig = Function(Vsig, name="sigma")
-out_dir = "solid-fenics/results"
+out_dir = "../results/"
 os.makedirs(out_dir, exist_ok=True)
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
 xdmf_file = XDMFFile(xdmf_path)
@@ -234,6 +243,7 @@ for i in range(Nsteps):
     update_aero_traction(t_aero, forces_eff)
 
     rhs_vec = assemble(L_form)
+    # does a function named apply exist?
     bc.apply(rhs_vec)
     solver.solve(K, u.vector(), rhs_vec)
 

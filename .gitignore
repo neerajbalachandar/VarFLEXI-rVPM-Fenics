@@ -21,5 +21,6 @@ solid-fenics/solid-fenics/results/elastodynamics-results.h5
 solid-fenics/solid-fenics/results/elastodynamics-results.xdmf
 
 output
+results
 
 .vscode/

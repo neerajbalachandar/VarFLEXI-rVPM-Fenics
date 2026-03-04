@@ -99,7 +99,7 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0)
 
 t_aero = Function(Vt, name="AerodynamicTraction")
 
-E = 100000.0
+E = 10000.0
 nu = 0.2
 mu = Constant(E/(2.0*(1.0+nu)))
 lmbda = Constant(E*nu/((1.0+nu)*(1.0-2.0*nu)))
@@ -299,6 +299,7 @@ def local_project(v, V, u=None):
         solver.solve_local_rhs(u)
 
 sig = Function(Vsig, name="sigma")
+#change after this run
 out_dir = "solid-fenics/results"
 os.makedirs(out_dir, exist_ok=True)
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")

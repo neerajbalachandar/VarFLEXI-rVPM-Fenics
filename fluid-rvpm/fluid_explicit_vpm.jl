@@ -11,6 +11,9 @@ vlm.VLMSolver._regularize(true)
 # Workaround for FLOWVLM colinearity bug:
 # when gamma===nothing, promote_type can become Union{Nothing,Float64}, and
 # zeros(::Type{Union{Nothing,Float64}}, 3) throws.
+
+
+#Understand what is done here
 function vlm.VLMSolver._V_AB(A::Vector{<:vlm.VLMSolver.FWrap}, B, C, gamma; ign_col::Bool=false)
     r0 = B - A
     r1 = C - A
@@ -73,7 +76,7 @@ end
 
 
 # SIMULATION PARAMETERS
-AOA             = 4.2
+AOA             = 0
 magVinf         = 10
 rho             = 0.10
 b               = 2.489
@@ -111,9 +114,10 @@ disp_scale_x     = 0.0            # keep 0 to avoid chord distortion instability
 disp_scale_y     = 0.0            # keep 0 to avoid spanwise panel collapse
 disp_scale_z     = 1.0
 
-Vinf(X,t) = magVinf*[cosd(AOA), 0.0, sind(AOA)]
+Vinf(X,t) = magVinf*[cosd(AOA), sind(AOA), 0.0]
 
 
+# Primary Question - why do we have a geometry definition here? if the solid fenics has a geom use the same, why confuse?
 # GEOMETRY
 println("Initializing geometry...")
 
