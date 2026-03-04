@@ -1,4 +1,4 @@
-# Airfoil geometry with the new meshing and mapping and features chordwise and spanwise discretization and geometry superimposed
+# Airfoil geometry with the new meshing and mapping and features chordwise and spanwise discretization and geometry superimposed, along with better and correct particle shedding
 
 from dolfin import *
 import numpy as np
@@ -106,7 +106,7 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0)
 
 t_aero = Function(Vt, name="AerodynamicTraction")
 
-E = 1000.0
+E = 10000.0
 nu = 0.2
 mu = Constant(E/(2.0*(1.0+nu)))
 lmbda = Constant(E*nu/((1.0+nu)*(1.0-2.0*nu)))
@@ -204,6 +204,7 @@ solver.parameters["symmetric"] = True
 
 panel_node_cache = {}
 coupling_node_cache = {}
+max_abs_force_component = 1.0e6
 
 
 def as_eta_array(values, n):
@@ -349,16 +350,41 @@ def update_aero_traction(t_aero, forces, n_span, n_chord, eta_chord):
     dofs_y = Vt.sub(1).dofmap().dofs()
     dofs_z = Vt.sub(2).dofmap().dofs()
 
+    eta_chord = as_eta_array(eta_chord, n_chord)
+    if n_chord == 1:
+        chord_edges = np.array([0.0, 1.0], dtype=float)
+    else:
+        chord_edges = np.zeros(n_chord + 1, dtype=float)
+        chord_edges[1:-1] = 0.5 * (eta_chord[:-1] + eta_chord[1:])
+        chord_edges[0] = max(0.0, eta_chord[0] - 0.5 * (eta_chord[1] - eta_chord[0]))
+        chord_edges[-1] = min(1.0, eta_chord[-1] + 0.5 * (eta_chord[-1] - eta_chord[-2]))
+        if chord_edges[-1] <= chord_edges[0]:
+            chord_edges = np.linspace(0.0, 1.0, n_chord + 1)
+
     panel_node_ids = get_panel_node_ids(n_span, n_chord, eta_chord)
     for panel_idx, ids in enumerate(panel_node_ids):
         if not ids:
             continue
         fx, fy, fz = forces[panel_idx]
+        i_span = panel_idx // n_chord
+        j_chord = panel_idx % n_chord
+
+        y_mid = (i_span + 0.5) * span / n_span
+        c_mid = chord_at(y_mid)
+        d_eta_c = max(chord_edges[j_chord + 1] - chord_edges[j_chord], 1e-8)
+        d_span = span / n_span
+        panel_area_one_side = max(c_mid * d_eta_c * d_span, 1e-10)
+
+        # Incoming fluid force is treated as total panel force; convert to
+        # traction and split over top and bottom marked aero surfaces.
+        tx = fx / (2.0 * panel_area_one_side)
+        ty = fy / (2.0 * panel_area_one_side)
+        tz = fz / (2.0 * panel_area_one_side)
         scale = 1.0 / len(ids)
         for i_node in ids:
-            vec[dofs_x[i_node]] += scale * fx
-            vec[dofs_y[i_node]] += scale * fy
-            vec[dofs_z[i_node]] += scale * fz
+            vec[dofs_x[i_node]] += scale * tx
+            vec[dofs_y[i_node]] += scale * ty
+            vec[dofs_z[i_node]] += scale * tz
 
     vec.apply("insert")
 
@@ -412,6 +438,7 @@ def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_o
                 eta_span_in=eta_span_in, eta_chord_in=eta_chord_in,
                 eta_span_out=eta_span_out, eta_chord_out=eta_chord_out
             )
+            forces = np.clip(forces, -max_abs_force_component, max_abs_force_component)
             return forces, True
 
     forces_legacy = np.asarray(data.get("force", []), dtype=float).reshape(-1, 3)
@@ -420,6 +447,7 @@ def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_o
         n_span_out, n_chord_out,
         eta_span_out=eta_span_out, eta_chord_out=eta_chord_out
     )
+    forces = np.clip(forces, -max_abs_force_component, max_abs_force_component)
     return forces, False
 
 def local_project(v, V, u=None):

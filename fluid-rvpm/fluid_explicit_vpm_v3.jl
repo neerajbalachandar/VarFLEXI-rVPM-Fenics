@@ -1,5 +1,5 @@
-# Updation of geometry inclusion from solid solver enabled, but needs correction!
-
+# Particle shedding enabled for flow field visualization
+# copy of v1
 using Sockets
 using JSON
 using LinearAlgebra
@@ -13,7 +13,6 @@ vlm.VLMSolver._regularize(true)
 # Workaround for FLOWVLM colinearity bug:
 # when gamma===nothing, promote_type can become Union{Nothing,Float64}, and
 # zeros(::Type{Union{Nothing,Float64}}, 3) throws.
-
 
 #Understand what is done here
 function vlm.VLMSolver._V_AB(A::Vector{<:vlm.VLMSolver.FWrap}, B, C, gamma; ign_col::Bool=false)
@@ -77,8 +76,18 @@ function vlm.VLMSolver._V_Ainf_out(A::Vector{<:vlm.VLMSolver.FWrap},
 end
 
 
+
+
+
+
+
+
+
+
+
+
 # SIMULATION PARAMETERS
-AOA             = 10
+AOA             = 0
 magVinf         = 10
 rho             = 0.10
 b               = 2.489
@@ -94,7 +103,7 @@ r               = 10.0
 central         = false
 
 wakelength      = 2.75*b
-ttot            = wakelength/magVinf
+ttot            = 4.0  #wakelength/magVinf
 nsteps          = 200
 dt              = ttot/nsteps
 
@@ -112,16 +121,15 @@ geom_relax       = 0.20           # 0<geom_relax<=1; lower is more damping
 force_relax      = 0.20           # 0<force_relax<=1
 max_abs_disp     = 0.01*b         # clamp incoming displacement magnitude
 max_abs_force    = 1.0e6          # clamp outgoing per-panel force component
-disp_scale_x     = 0.25           # controlled chordwise update
-disp_scale_y     = 0.10           # controlled spanwise update
-disp_scale_z     = 1.00           # full normal update
+disp_scale_x     = 0.0            # keep 0 to avoid chord distortion instability
+disp_scale_y     = 0.0            # keep 0 to avoid spanwise panel collapse
+disp_scale_z     = 1.0
 
-Vinf(X,t) = magVinf*[cosd(AOA), 0.0, sind(AOA)]
+Vinf(X,t) = magVinf*[1.0, 0.0, 0.0]
 
 
-# Base geometry template:
-# FLOWUnsteady needs an internal wing topology. Coupling deforms this template
-# every step with displacement data received from the solid solver.
+# Primary Question - why do we have a geometry definition here? if the solid fenics has a geom use the same, why confuse?
+# GEOMETRY
 println("Initializing geometry...")
 
 wing = vlm.simpleWing(b, ar, tr, twist_root, lambda, gamma;
@@ -149,6 +157,11 @@ Winit = zeros(3)
 
 simulation = uns.Simulation(vehicle, maneuver, Vref, RPMref, ttot;
                               Vinit=Vinit, Winit=Winit)
+
+# Output configuration
+save_path = normpath(joinpath(@__DIR__, "..", "results", "fluid"))
+run_name = "fluid_explicit_vpm_v3"
+mkpath(save_path)
 
 # Maximum number of particles
 max_particles = (nsteps+1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step+1) + p_per_step)
@@ -197,115 +210,60 @@ function update_geometry_absolute(wing, wing_ref, u_cp)
     wing._HSs = nothing
 end
 
-function calc_panel_eta(wing)
-    m = vlm.get_m(wing)
-    ys = [wing._ym[i] for i in 1:m]
-    ymin, ymax = minimum(ys), maximum(ys)
-    dy = max(ymax - ymin, eps(Float64))
-    return [(ys[i] - ymin) / dy for i in 1:m]
-end
-
-function read_json_line(sock::TCPSocket, step::Int)
+function read_json_line(sock::TCPSocket, tag::String)
     line = try
         readline(sock)
     catch err
         if err isa EOFError
-            error("Coupling socket closed before geometry at fluid step $step")
+            error("$tag: coupling socket closed")
         end
         rethrow(err)
     end
     s = String(line)
     if isempty(strip(s))
-        error("Received empty geometry line from coupling at fluid step $step")
+        error("$tag: received empty line from coupling")
     end
     return JSON.parse(s)
 end
 
-function resample_by_index(geo::Matrix{Float64}, m::Int)
-    ng = size(geo, 1)
-    out = zeros(Float64, m, 3)
-    if ng == 1
-        for i in 1:m
-            out[i, :] .= geo[1, :]
-        end
-        return out
-    end
-    for i in 1:m
-        s = 1 + (i - 1) * (ng - 1) / max(m - 1, 1)
-        i0 = floor(Int, s)
-        i1 = ceil(Int, s)
-        w = s - i0
-        out[i, :] .= (1 - w) .* geo[i0, :] .+ w .* geo[i1, :]
-    end
-    return out
-end
-
-function resample_by_eta(geo::Matrix{Float64}, eta_src::Vector{Float64}, eta_dst::Vector{Float64})
-    nsrc = size(geo, 1)
-    ndst = length(eta_dst)
-    out = zeros(Float64, ndst, 3)
-
-    if nsrc == 1
-        for i in 1:ndst
-            out[i, :] .= geo[1, :]
-        end
-        return out
-    end
-
-    p = sortperm(eta_src)
-    eta_s = eta_src[p]
-    for i in 1:ndst
-        e = clamp(eta_dst[i], eta_s[1], eta_s[end])
-        j = searchsortedlast(eta_s, e)
-        if j <= 0
-            out[i, :] .= geo[p[1], :]
-        elseif j >= nsrc
-            out[i, :] .= geo[p[end], :]
-        else
-            i0 = p[j]
-            i1 = p[j + 1]
-            e0 = eta_s[j]
-            e1 = eta_s[j + 1]
-            w = (e - e0) / max(e1 - e0, eps(Float64))
-            out[i, :] .= (1 - w) .* geo[i0, :] .+ w .* geo[i1, :]
-        end
-    end
-    return out
-end
-
-function decode_geometry_payload(msg, m::Int, eta_dst::Vector{Float64})
+function decode_geometry_payload(msg, m::Int)
     if !haskey(msg, "geometry")
         error("Geometry payload missing key \"geometry\"")
     end
-    geo_raw = msg["geometry"]
-    ng = length(geo_raw)
+    geo = msg["geometry"]
+    ng = length(geo)
     if ng == 0
         error("Received empty geometry array from coupling")
     end
 
-    geo = zeros(Float64, ng, 3)
-    for i in 1:ng
-        geo[i, 1] = Float64(geo_raw[i][1])
-        geo[i, 2] = Float64(geo_raw[i][2])
-        geo[i, 3] = Float64(geo_raw[i][3])
-    end
-
-    use_eta = false
-    if haskey(msg, "eta")
-        eta_raw = msg["eta"]
-        if length(eta_raw) == ng
-            eta_src = Float64.(eta_raw)
-            if all(isfinite, eta_src)
-                use_eta = true
-                return resample_by_eta(geo, eta_src, eta_dst), ng, use_eta
+    u_cp_raw = zeros(Float64, m, 3)
+    if ng == m
+        for i in 1:m
+            u_cp_raw[i,1] = Float64(geo[i][1])
+            u_cp_raw[i,2] = Float64(geo[i][2])
+            u_cp_raw[i,3] = Float64(geo[i][3])
+        end
+    elseif ng == 1
+        for i in 1:m
+            u_cp_raw[i,1] = Float64(geo[1][1])
+            u_cp_raw[i,2] = Float64(geo[1][2])
+            u_cp_raw[i,3] = Float64(geo[1][3])
+        end
+    else
+        @warn "Geometry panel count mismatch (solid=$ng, fluid=$m). Resampling."
+        for i in 1:m
+            s = 1 + (i-1) * (ng-1) / max(m-1, 1)
+            i0 = floor(Int, s)
+            i1 = ceil(Int, s)
+            w = s - i0
+            for k in 1:3
+                v0 = Float64(geo[i0][k])
+                v1 = Float64(geo[i1][k])
+                u_cp_raw[i,k] = (1-w)*v0 + w*v1
             end
         end
     end
-
-    if ng == m
-        return geo, ng, use_eta
-    end
-    return resample_by_index(geo, m), ng, use_eta
+    return u_cp_raw
 end
 
 
@@ -319,74 +277,31 @@ write(sock, JSON.json(Dict("role"=>"fluid")) * "\n")
 flush(sock)
 
 m_global = vlm.get_m(wing)
-panel_eta_fluid = calc_panel_eta(wing_ref)
 u_cp_prev = zeros(Float64, m_global, 3)
 forces_prev = [zeros(3) for _ in 1:m_global]
 
+# Receive initial geometry from solid before launching the continuous run.
+msg0 = read_json_line(sock, "init")
+u_cp_raw0 = decode_geometry_payload(msg0, m_global)
+u_cp_raw0[:,1] .*= disp_scale_x
+u_cp_raw0[:,2] .*= disp_scale_y
+u_cp_raw0[:,3] .*= disp_scale_z
+u_cp_raw0 .= clamp.(u_cp_raw0, -max_abs_disp, max_abs_disp)
+u_cp0 = geom_relax .* u_cp_raw0 .+ (1 - geom_relax) .* u_cp_prev
+u_cp_prev .= u_cp0
+update_geometry_absolute(wing, wing_ref, u_cp0)
+if !haskey(wing.sol, "Gamma")
+    wing.sol["Gamma"] = zeros(m_global)
+end
 
-# TIME STEPPING LOOP
-
-for step in 1:nsteps
-
-    println("Fluid step $step")
-
-    # -----------------------------------------
-    # 1. RECEIVE UPDATED GEOMETRY FROM SOLID
-    # -----------------------------------------
-    msg = read_json_line(sock, step)
+step_ref = Ref(0)
+function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
+    step_ref[] += 1
+    step = step_ref[]
     m = vlm.get_m(wing)
-    u_cp_raw, ng, used_eta = decode_geometry_payload(msg, m, panel_eta_fluid)
-    if ng != m
-        @warn "Geometry panel count mismatch (solid=$ng, fluid=$m). Resampled."
-    end
-    if used_eta && (step == 1 || step % 20 == 0)
-        println("INFO: Fluid geometry mapped by eta at step $step")
-    end
-    u_cp_raw[:,1] .*= disp_scale_x
-    u_cp_raw[:,2] .*= disp_scale_y
-    u_cp_raw[:,3] .*= disp_scale_z
-    if any(!isfinite, u_cp_raw)
-        @warn "Non-finite displacement received; reusing previous geometry"
-        u_cp_raw .= u_cp_prev
-    end
-    u_cp_raw .= clamp.(u_cp_raw, -max_abs_disp, max_abs_disp)
-    u_cp = geom_relax .* u_cp_raw .+ (1 - geom_relax) .* u_cp_prev
-    u_cp_prev .= u_cp
-    if step == 1 || step % 20 == 0
-        dmax = maximum(abs.(u_cp))
-        println("INFO: max |u_cp| at step $step = $dmax")
-    end
 
-    # -----------------------------------------
-    # 2. UPDATE WING GEOMETRY
-    # -----------------------------------------
-    update_geometry_absolute(wing, wing_ref, u_cp)
-    if !haskey(wing.sol, "Gamma")
-        wing.sol["Gamma"] = zeros(m)
-    end
-
-    # -----------------------------------------
-    # 3. ADVANCE FLUID BY ONE STEP
-    # -----------------------------------------
-    uns.run_simulation(simulation, 1;
-        Vinf=Vinf,
-        rho=rho,
-        p_per_step=p_per_step,
-        max_particles=max_particles,
-        sigma_vlm_solver=sigma_vlm_solver,
-        sigma_vlm_surf=sigma_vlm_surf,
-        sigma_rotor_surf=sigma_vlm_surf,
-        sigma_vpm_overwrite=sigma_vpm_overwrite,
-        shed_starting=(step == 1 ? shed_starting : false),
-        vlm_rlx=vlm_rlx
-    )
-
-    # -----------------------------------------
-    # 4. EXTRACT PANEL FORCES
-    # -----------------------------------------
-    m = vlm.get_m(wing)
+    # Extract panel forces
     forces = Vector{Vector{Float64}}(undef, m)
-
     for i in 1:m
         Γ = wing.sol["Gamma"][i]
         if !isfinite(Γ)
@@ -397,7 +312,7 @@ for step in 1:nsteps
         forces[i] = [0.0, 0.0, fz]
     end
 
-    # Force relaxation before sending to solid
+    # Relax forces
     for i in 1:m
         for k in 1:3
             forces[i][k] = force_relax*forces[i][k] + (1-force_relax)*forces_prev[i][k]
@@ -405,15 +320,57 @@ for step in 1:nsteps
         forces_prev[i] = copy(forces[i])
     end
 
-    println("DEBUG: First force = ", forces[1])
-
-    # -----------------------------------------
-    # 5. SEND FORCES TO COUPLING SERVER
-    # -----------------------------------------
-    write(sock, JSON.json(Dict("step"=>step, "force"=>forces, "eta"=>panel_eta_fluid))*"\n")
+    println("DEBUG(step=$step): first force = ", forces[1])
+    write(sock, JSON.json(Dict("step"=>step, "force"=>forces))*"\n")
     flush(sock)
 
+    # Receive geometry for next step and update.
+    if step < nsteps
+        msg = read_json_line(sock, "step $step")
+        u_cp_raw = decode_geometry_payload(msg, m)
+        u_cp_raw[:,1] .*= disp_scale_x
+        u_cp_raw[:,2] .*= disp_scale_y
+        u_cp_raw[:,3] .*= disp_scale_z
+        if any(!isfinite, u_cp_raw)
+            @warn "Non-finite displacement received at step $step; reusing previous geometry"
+            u_cp_raw .= u_cp_prev
+        end
+        u_cp_raw .= clamp.(u_cp_raw, -max_abs_disp, max_abs_disp)
+        u_cp = geom_relax .* u_cp_raw .+ (1 - geom_relax) .* u_cp_prev
+        u_cp_prev .= u_cp
+        update_geometry_absolute(wing, wing_ref, u_cp)
+        if !haskey(wing.sol, "Gamma")
+            wing.sol["Gamma"] = zeros(m)
+        end
+    end
+
+    # Stop exactly after nsteps coupling exchanges.
+    return step >= nsteps
 end
+
+# Continuous run so wake particles are shed/convected across all time steps.
+uns.run_simulation(simulation, nsteps;
+    Vinf=Vinf,
+    rho=rho,
+    p_per_step=p_per_step,
+    max_particles=max_particles,
+    sigma_vlm_solver=sigma_vlm_solver,
+    sigma_vlm_surf=sigma_vlm_surf,
+    sigma_rotor_surf=sigma_vlm_surf,
+    sigma_vpm_overwrite=sigma_vpm_overwrite,
+    shed_starting=shed_starting,
+    shed_unsteady=true,
+    wake_coupled=true,
+    vlm_rlx=vlm_rlx,
+    extra_runtime_function=coupling_runtime_function,
+    save_path=save_path,
+    run_name=run_name,
+    create_savepath=false,
+    prompt=false,
+    nsteps_save=1,
+    save_horseshoes=true
+)
 
 close(sock)
 println("Fluid solver finished.")
+println("Fluid outputs saved in: $save_path")

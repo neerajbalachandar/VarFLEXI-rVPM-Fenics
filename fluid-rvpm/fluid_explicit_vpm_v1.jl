@@ -1,3 +1,5 @@
+# Classic working code without geomtry inclusions, flow field vis, or chordwise discretization
+
 using Sockets
 using JSON
 using LinearAlgebra
@@ -114,7 +116,7 @@ disp_scale_x     = 0.0            # keep 0 to avoid chord distortion instability
 disp_scale_y     = 0.0            # keep 0 to avoid spanwise panel collapse
 disp_scale_z     = 1.0
 
-Vinf(X,t) = magVinf*[cosd(AOA), sind(AOA), 0.0]
+Vinf(X,t) = magVinf*[1.0, 0.0, 0.0] # 1cos(10t)
 
 
 # Primary Question - why do we have a geometry definition here? if the solid fenics has a geom use the same, why confuse?
@@ -146,6 +148,11 @@ Winit = zeros(3)
 
 simulation = uns.Simulation(vehicle, maneuver, Vref, RPMref, ttot;
                               Vinit=Vinit, Winit=Winit)
+
+# Output configuration
+save_path = normpath(joinpath(@__DIR__, "..", "results", "fluid"))
+run_name = "fluid_explicit_vpm_v1"
+mkpath(save_path)
 
 # Maximum number of particles
 max_particles = (nsteps+1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step+1) + p_per_step)
@@ -288,7 +295,12 @@ for step in 1:nsteps
         sigma_rotor_surf=sigma_vlm_surf,
         sigma_vpm_overwrite=sigma_vpm_overwrite,
         shed_starting=(step == 1 ? shed_starting : false),
-        vlm_rlx=vlm_rlx
+        vlm_rlx=vlm_rlx,
+        save_path=save_path,
+        run_name=run_name,
+        create_savepath=false,
+        prompt=false,
+        nsteps_save=1
     )
 
     # -----------------------------------------
@@ -327,3 +339,4 @@ end
 
 close(sock)
 println("Fluid solver finished.")
+println("Fluid outputs saved in: $save_path")
