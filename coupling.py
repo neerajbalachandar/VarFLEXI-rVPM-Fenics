@@ -55,24 +55,28 @@ for step in range(1, nsteps+1):
     print("Waiting for geometry from solid...")
     geo_data = read_json_line(solid_file, "Solid")
     print("Geometry received.")
-    geometry = geo_data["geometry"]
+    geometry = geo_data.get("geometry", [])
+    if not isinstance(geometry, list) or len(geometry) == 0:
+        raise RuntimeError(f"Solid sent invalid geometry payload at step {step}")
 
     # 2) Send geometry to fluid
     print("Sending geometry to fluid...")
-    fluid_conn.sendall((json.dumps({"geometry": geometry}) + "\n").encode())
+    fluid_conn.sendall((json.dumps(geo_data) + "\n").encode())
 
     # 3) Receive forces from fluid
     print("Waiting for forces from fluid...")
     force_data = read_json_line(fluid_file, "Fluid")
     print("Forces received.")
-    forces = force_data["force"]
+    forces = force_data.get("force", [])
+    if not isinstance(forces, list):
+        raise RuntimeError(f"Fluid sent invalid force payload at step {step}")
 
     # 🔎 DEBUG PRINT
     print("Sample force[0] =", forces[0])
 
     # 4) Send forces to solid
     print("Sending forces to solid...")
-    solid_conn.sendall((json.dumps({"force": forces}) + "\n").encode())
+    solid_conn.sendall((json.dumps(force_data) + "\n").encode())
 
 print("Coupling finished.")
 
