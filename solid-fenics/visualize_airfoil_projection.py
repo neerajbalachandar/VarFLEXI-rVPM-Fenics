@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 
 
 #just for visualization 
+#naca 0012 wing
 span = 1.0
 root_chord = 0.12
 tip_chord = 0.08
