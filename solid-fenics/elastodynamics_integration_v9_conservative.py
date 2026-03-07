@@ -1,11 +1,12 @@
 # Airfoil geometry with the new meshing and mapping and features chordwise and spanwise discretization and geometry superimposed, along with better and correct particle shedding
-# along with shedding stabilised fluid - v6
+# along with shedding stabilised fluid - v6, work conservation, AOA 20deg
 from dolfin import *
 import numpy as np
 import matplotlib.pyplot as plt
 import socket
 import json
 import os
+from scipy.spatial import cKDTree
 
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
@@ -21,12 +22,13 @@ tip_chord = 0.08
 thickness_ratio = 0.12
 leading_edge_sweep = 0.0
 
-nx, ny, nz = 32, 200, 8
+# Speed-tuned mesh for interactive coupled runs.
+nx, ny, nz = 24, 120, 6
 mesh = BoxMesh(Point(0.0, 0.0, -0.5), Point(1.0, span, 0.5), nx, ny, nz)
 span_strips = 200
 # Must match fluid-side panel count (fluid-rvpm/fluid_explicit_vpm.jl with n=50 -> m=100)
-n_span = 100
-n_chord = 5
+n_span = 80
+n_chord = 12
 m_panels_comm = n_span * n_chord
 eta_span_comm = np.linspace(0.0, 1.0, n_span)
 eta_chord_edges = np.linspace(0.0, 1.0, n_chord + 1)
@@ -35,6 +37,7 @@ eta_chord_comm = eta_chord_edges[:-1] + 0.75 * (eta_chord_edges[1:] - eta_chord_
 # Conservative coupling controls
 work_conservative_mode = True
 rbf_epsilon = 0.06
+aoa_deg = 20.0
 
 
 def chord_at(y_val):
@@ -454,6 +457,116 @@ def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_o
     forces = np.clip(forces, -max_abs_force_component, max_abs_force_component)
     return forces, False
 
+def get_aero_surface_node_ids():
+    Vscalar = Vt.sub(0).collapse()
+    coords = Vscalar.tabulate_dof_coordinates().reshape((-1, 3))
+    ids = []
+    for i_node, X in enumerate(coords):
+        y_val = X[1]
+        chord = chord_at(y_val)
+        if chord <= 0.0:
+            continue
+        x_le = x_leading_edge_at(y_val)
+        xi = (X[0] - x_le) / max(chord, 1e-12)
+        if xi < -0.02 or xi > 1.02:
+            continue
+        z_surf = chord * naca_half_thickness(xi)
+        if abs(abs(X[2]) - z_surf) > panel_tol_z:
+            continue
+        ids.append(i_node)
+    return np.array(sorted(set(ids)), dtype=np.int64), coords
+
+def extract_coupling_node_indices(n_span, n_chord, eta_chord, coords):
+    eta_chord = as_eta_array(eta_chord, n_chord)
+    tree = cKDTree(coords)
+    targets = []
+    ids = []
+    for i_span in range(n_span):
+        y_target = (i_span + 0.5) * span / n_span
+        chord = chord_at(y_target)
+        x_le = x_leading_edge_at(y_target)
+        for j_chord in range(n_chord):
+            xi_target = eta_chord[j_chord]
+            x_target = x_le + xi_target * chord
+            z_target = chord * naca_half_thickness(xi_target)
+            targets.append([x_target, y_target, z_target])
+    _, idx = tree.query(np.asarray(targets), k=1)
+    ids = idx.astype(np.int64).tolist()
+    return np.asarray(ids, dtype=np.int64)
+
+def build_local_rbf_map(fluid_points, solid_points, epsilon, n_neighbors=32):
+    fluid_points = np.asarray(fluid_points, dtype=float)
+    solid_points = np.asarray(solid_points, dtype=float)
+    eps2 = max(float(epsilon) ** 2, 1e-16)
+    n_f = fluid_points.shape[0]
+    n_s = solid_points.shape[0]
+    k = int(max(1, min(n_neighbors, n_s)))
+
+    tree = cKDTree(solid_points)
+    d, idx = tree.query(fluid_points, k=k)
+    if k == 1:
+        d = d.reshape(-1, 1)
+        idx = idx.reshape(-1, 1)
+    nbr_ids = idx.astype(np.int64)
+    r2 = d * d
+    nbr_w = np.exp(-r2 / eps2)
+    row_sum = np.sum(nbr_w, axis=1, keepdims=True)
+    bad = np.where(row_sum[:, 0] <= 1e-16)[0]
+    for bi in bad:
+        nbr_w[bi, :] = 0.0
+        nbr_w[bi, 0] = 1.0
+    row_sum = np.maximum(row_sum, 1e-16)
+    nbr_w /= row_sum
+    return nbr_ids, nbr_w
+
+def map_displacements_to_fluid(u_nodes, nbr_ids, nbr_w):
+    n_f, k = nbr_ids.shape
+    out = np.zeros((n_f, 3), dtype=float)
+    for q in range(k):
+        out += nbr_w[:, q:q+1] * u_nodes[nbr_ids[:, q], :]
+    return out
+
+def map_forces_to_solid(f_fluid, n_solid_nodes, nbr_ids, nbr_w):
+    n_f, k = nbr_ids.shape
+    out = np.zeros((n_solid_nodes, 3), dtype=float)
+    for q in range(k):
+        contrib = nbr_w[:, q:q+1] * f_fluid
+        np.add.at(out, nbr_ids[:, q], contrib)
+    return out
+
+def compute_S_lumped(n_solid_nodes, nbr_ids, nbr_w, A_diag):
+    n_f, k = nbr_ids.shape
+    S = np.zeros((n_solid_nodes,), dtype=float)
+    for q in range(k):
+        np.add.at(S, nbr_ids[:, q], nbr_w[:, q] * A_diag)
+    S = np.maximum(S, 1e-14)
+    return S
+
+def apply_Tf_operator(Fa, n_solid_nodes, nbr_ids, nbr_w, A_diag, S_lumped):
+    # Paper-style discrete force map:
+    #   T_f = S^{-1} T_u^T A
+    # with T_u represented by the local RBF weights.
+    FaA = Fa * A_diag[:, None]
+    rhs = map_forces_to_solid(FaA, n_solid_nodes, nbr_ids, nbr_w)   # T_u^T A Fa
+    Fs_coeff = rhs / S_lumped[:, None]                              # S^{-1}(...)
+    return Fs_coeff, rhs
+
+def get_nodal_displacements(u_fun, node_ids, dofs_x, dofs_y, dofs_z):
+    u_arr = u_fun.vector().get_local()
+    out = np.zeros((len(node_ids), 3), dtype=float)
+    out[:, 0] = u_arr[dofs_x[node_ids]]
+    out[:, 1] = u_arr[dofs_y[node_ids]]
+    out[:, 2] = u_arr[dofs_z[node_ids]]
+    return out
+
+def add_nodal_forces_to_rhs(rhs_vec, nodal_forces, node_ids, dofs_x, dofs_y, dofs_z):
+    arr = rhs_vec.get_local()
+    arr[dofs_x[node_ids]] += nodal_forces[:, 0]
+    arr[dofs_y[node_ids]] += nodal_forces[:, 1]
+    arr[dofs_z[node_ids]] += nodal_forces[:, 2]
+    rhs_vec.set_local(arr)
+    rhs_vec.apply("insert")
+
 def local_project(v, V, u=None):
     dv = TrialFunction(V)
     v_ = TestFunction(V)
@@ -484,13 +597,47 @@ sock.connect(("127.0.0.1", 9000))
 sock_file = sock.makefile("r")
 sock.sendall((json.dumps({"role": "solid"}) + "\n").encode())
 print("Solid connected.")
+print(f"Configured AoA metadata: {aoa_deg} deg")
 
 # Communication discretization (must match fluid panel count)
-cp_nodes = extract_coupling_nodes(n_span, n_chord, eta_chord_comm)
-np.savetxt(os.path.join(out_dir, "coupling_nodes.csv"), np.array(cp_nodes), delimiter=",", header="x,y,z", comments="")
+print("Building interface node sets...")
+aero_node_ids, scalar_coords = get_aero_surface_node_ids()
+cp_node_ids = extract_coupling_node_indices(n_span, n_chord, eta_chord_comm, scalar_coords)
+cp_nodes = scalar_coords[cp_node_ids, :]
+np.savetxt(os.path.join(out_dir, "coupling_nodes.csv"), cp_nodes, delimiter=",", header="x,y,z", comments="")
+print(f"Interface nodes ready: aero={len(aero_node_ids)}, coupling={len(cp_node_ids)}")
+
+# Work-conservative transfer operators:
+# fluid panel displacements u_f = G * u_s_nodes
+# solid nodal forces      F_s = G^T * F_f
+interface_node_ids = aero_node_ids
+interface_coords = scalar_coords[interface_node_ids, :]
+print("Building local RBF transfer map...")
+nbr_ids, nbr_w = build_local_rbf_map(cp_nodes, interface_coords, rbf_epsilon, n_neighbors=16)
+print(f"Conservative mapping: {cp_nodes.shape[0]} fluid points <- {interface_coords.shape[0]} solid interface nodes")
+
+# Explicit operators used in paper-style formulation:
+#   u_f = T_u u_s
+#   F_s = T_f F_f, with T_f = S^{-1} T_u^T A
+# Here aerodynamic payload is panel-total force, so A = I.
+A_diag = np.ones((cp_nodes.shape[0],), dtype=float)
+S_lumped = compute_S_lumped(len(interface_node_ids), nbr_ids, nbr_w, A_diag)
+print(f"Operator setup: A=I ({len(A_diag)} dofs), S_lumped min/max = {S_lumped.min():.3e}/{S_lumped.max():.3e}")
+
+dofs_u_x = np.asarray(V.sub(0).dofmap().dofs(), dtype=np.int64)
+dofs_u_y = np.asarray(V.sub(1).dofmap().dofs(), dtype=np.int64)
+dofs_u_z = np.asarray(V.sub(2).dofmap().dofs(), dtype=np.int64)
+
+if work_conservative_mode:
+    # Keep variational traction zero; aerodynamic coupling is injected as
+    # equivalent nodal loads from conservative transfer.
+    t_aero.vector().zero()
+    t_aero.vector().apply("insert")
+
 u_cp0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
 sock.sendall((json.dumps({
     "step": 0,
+    "aoa_deg": aoa_deg,
     "n_span": n_span,
     "n_chord": n_chord,
     "eta_span": eta_span_comm.tolist(),
@@ -503,7 +650,7 @@ time = np.linspace(0, T, Nsteps+1)
 u_tip = np.zeros((Nsteps+1,))
 energies = np.zeros((Nsteps+1,4))
 E_damp = 0
-force_relax = 0.20
+force_relax = 1.0 if work_conservative_mode else 0.20
 forces_prev = None
 
 for i in range(Nsteps):
@@ -538,9 +685,29 @@ for i in range(Nsteps):
         forces_eff = force_relax*forces + (1.0-force_relax)*forces_prev
     forces_prev = forces_eff.copy()
 
-    update_aero_traction(t_aero, forces_eff, n_span, n_chord, eta_chord_comm)
+    nodal_forces = None
+    Fs_coeff = None
+    if work_conservative_mode:
+        Fs_coeff, nodal_forces = apply_Tf_operator(
+            forces_eff, len(interface_node_ids), nbr_ids, nbr_w, A_diag, S_lumped
+        )
+        if not np.isfinite(nodal_forces).all():
+            raise RuntimeError(f"Non-finite mapped nodal forces at solid step {i+1}")
+
+        # Discrete work audit on transfer operators.
+        u_nodes_prev = get_nodal_displacements(u_old, interface_node_ids, dofs_u_x, dofs_u_y, dofs_u_z)
+        u_cp_prev = map_displacements_to_fluid(u_nodes_prev, nbr_ids, nbr_w)
+        Wf = float(np.sum(u_cp_prev * (forces_eff * A_diag[:, None])))
+        Ws = float(np.sum(u_nodes_prev * (Fs_coeff * S_lumped[:, None])))
+        rel_work_err = abs(Wf - Ws) / max(abs(Wf), abs(Ws), 1e-16)
+        if i == 0 or (i + 1) % 20 == 0:
+            print(f"Work audit step {i+1}: Wf={Wf:.6e}, Ws={Ws:.6e}, rel_err={rel_work_err:.3e}")
+    else:
+        update_aero_traction(t_aero, forces_eff, n_span, n_chord, eta_chord_comm)
 
     rhs_vec = assemble(L_form)
+    if work_conservative_mode and nodal_forces is not None:
+        add_nodal_forces_to_rhs(rhs_vec, nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, dofs_u_z)
     bc.apply(rhs_vec)
     try:
         solver.solve(K, u.vector(), rhs_vec)
@@ -568,22 +735,28 @@ for i in range(Nsteps):
 
     # Send geometry for the next fluid step (not needed after final force).
     if i < Nsteps - 1:
-        u_cp = []
-        for j in range(m_panels_comm):
-            x_cp, y_cp, z_cp = cp_nodes[j]
-            try:
-                ux, uy, uz = u(x_cp, y_cp, z_cp)
-            except RuntimeError:
-                # Fallback to the local mid-surface if exact point lookup fails.
+        if work_conservative_mode:
+            u_nodes = get_nodal_displacements(u, interface_node_ids, dofs_u_x, dofs_u_y, dofs_u_z)
+            u_cp_arr = map_displacements_to_fluid(u_nodes, nbr_ids, nbr_w)
+            u_cp = u_cp_arr.tolist()
+        else:
+            u_cp = []
+            for j in range(m_panels_comm):
+                x_cp, y_cp, z_cp = cp_nodes[j]
                 try:
-                    ux, uy, uz = u(x_cp, y_cp, 0.0)
+                    ux, uy, uz = u(x_cp, y_cp, z_cp)
                 except RuntimeError:
-                    print(f"Solid step {i+1}/{Nsteps}: failed displacement lookup at panel {j}, using zeros.")
-                    ux, uy, uz = 0.0, 0.0, 0.0
-            u_cp.append([float(ux), float(uy), float(uz)])
+                    # Fallback to the local mid-surface if exact point lookup fails.
+                    try:
+                        ux, uy, uz = u(x_cp, y_cp, 0.0)
+                    except RuntimeError:
+                        print(f"Solid step {i+1}/{Nsteps}: failed displacement lookup at panel {j}, using zeros.")
+                        ux, uy, uz = 0.0, 0.0, 0.0
+                u_cp.append([float(ux), float(uy), float(uz)])
 
         msg_geo = json.dumps({
             "step": i + 1,
+            "aoa_deg": aoa_deg,
             "n_span": n_span,
             "n_chord": n_chord,
             "eta_span": eta_span_comm.tolist(),

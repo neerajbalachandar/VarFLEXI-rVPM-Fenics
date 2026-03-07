@@ -1,11 +1,12 @@
 # Particle shedding enabled for flow field visualization, chordwise discretization enabled and geometry superimposed, 
-# along with better and correct particle shedding, shedding stabilised with flowunsteady sample codes
+# along with better and correct particle shedding, shedding stabilised with flowunsteady sample codesm, work conservation, AOA 20deg
 
 using Sockets
 using JSON
 using LinearAlgebra
 import FLOWUnsteady as uns
 import FLOWVLM as vlm
+import FLOWVPM as vpm
 
 # Avoid FLOWVLM colinearity edge-case crash when Gamma is `nothing` in
 # geometric-factor evaluations.
@@ -86,9 +87,9 @@ end
 
 
 
-
+#------------------------------------------------------MAIN----------------------------------------------------
 # SIMULATION PARAMETERS
-AOA             = 0
+AOA             = 20.0
 magVinf         = 10
 rho             = 0.10
 
@@ -105,21 +106,22 @@ twist_root      = 0.0
 twist_tip       = 0.0
 gamma           = 0.0
 
-n_span          = 100
+n_span          = 80
 
 wakelength      = 2.75*b
 ttot            = 4.0   # wakelength/magVinf
-nsteps          = 200
+nsteps          = 400
 dt              = ttot/nsteps
 
 # VPM parameters
+# FLOWUnsteady expects integer particle release count per step.
 p_per_step      = 1
 lambda_vpm      = 2.0
 sigma_vpm_overwrite = lambda_vpm * magVinf * dt / p_per_step
 sigma_vlm_solver = -1
 sigma_vlm_surf   = 0.05*b
 shed_starting    = false
-unsteady_shedcrit = 0.001
+unsteady_shedcrit = 0.01
 vlm_rlx          = 0.35
 
 # Coupling stabilization (numerical damping)
@@ -133,7 +135,7 @@ disp_scale_y     = 1.00           # debug alignment: apply full displacement
 disp_scale_z     = 1.00           # full normal update
 
 # 2D coupling grid (span x chord) used for socket data exchange
-n_chord     = 5
+n_chord     = 12
 eta_chord_edges  = collect(range(0.0, 1.0; length=n_chord+1))
 eta_chord_cp     = [(eta_chord_edges[j] + 0.75*(eta_chord_edges[j+1]-eta_chord_edges[j]))
                      for j in 1:n_chord]
@@ -144,7 +146,7 @@ eta_chord_vortex = [(eta_chord_edges[j] + 0.25*(eta_chord_edges[j+1]-eta_chord_e
 eta_chord_le     = [eta_chord_edges[j] for j in 1:n_chord]
 eta_chord_te     = [eta_chord_edges[j+1] for j in 1:n_chord]
 
-Vinf(X,t) = magVinf*[1.0, 0.0, 0.0]
+Vinf(X,t) = magVinf*[cosd(AOA), 0.0, sind(AOA)]
 
 
 # Primary Question - why do we have a geometry definition here? if the solid fenics has a geom use the same, why confuse?
@@ -243,11 +245,11 @@ simulation = uns.Simulation(vehicle, maneuver, Vref, RPMref, ttot;
 
 # Output configuration
 save_path = normpath(joinpath(@__DIR__, "..", "results", "fluid"))
-run_name = "fluid_explicit_vpm_v6"
+run_name = "fluid_explicit_vpm_v7_conservative"
 mkpath(save_path)
 
-# Maximum number of particles
-max_particles = (nsteps+1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step+1) + p_per_step)
+# Maximum number of particles (must be Int for FLOWVPM.ParticleField constructor)
+max_particles = Int((nsteps+1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step+1) + p_per_step))
 
 # For chordwise-row decomposition, only the aft-most row represents the
 # physical trailing edge and should shed wake particles.
@@ -258,22 +260,38 @@ omit_shedding_rows = collect(1:max(0, n_chord-1))
 rmv_strength = 2 * 2 / p_per_step * dt / (1 / 12)
 minmaxGamma = rmv_strength .* [0.0001, 0.15]
 wake_treatment_strength = uns.remove_particles_strength(
-    minmaxGamma[1]^2, minmaxGamma[2]^2; every_nsteps=10
+    minmaxGamma[1]^2, minmaxGamma[2]^2; every_nsteps=5
 )
 
 minmaxsigma = sigma_vpm_overwrite .* [0.1, 6.0]
 wake_treatment_sigma = uns.remove_particles_sigma(
-    minmaxsigma[1], minmaxsigma[2]; every_nsteps=10
+    minmaxsigma[1], minmaxsigma[2]; every_nsteps=5
 )
 
 wake_treatment_sphere = uns.remove_particles_sphere(
-    (2.5 * b)^2, 1; Xoff=[0.5 * b, 0.0, 0.0]
+    (3.0 * b)^2, 1; Xoff=[0.5 * b, 0.0, 0.0]
 )
 
 wake_treatment = uns.concatenate(
     wake_treatment_sphere,
     wake_treatment_strength,
     wake_treatment_sigma
+)
+
+# Robust FMM setup: disable rho/sigma auto-root solve that can fail to bracket
+# for extreme particle states in long coupled runs.
+vpm_fmm_settings = vpm.FMM(
+    p=4,
+    ncrit=50,
+    theta=0.4,
+    shrink_recenter=true,
+    relative_tolerance=1e-3,
+    absolute_tolerance=1e-3,
+    autotune_p=true,
+    autotune_ncrit=true,
+    autotune_reg_error=false,
+    default_rho_over_sigma=1.0,
+    min_ncrit=3
 )
 
 # GEOMETRY UPDATE
@@ -502,7 +520,7 @@ if used2d0
 end
 
 step_ref = Ref(0)
-use_ftot_force = Ref(true)
+use_ftot_force = Ref(false)
 function ensure_gamma!(wing, m)
     if !haskey(wing.sol, "Gamma") || length(wing.sol["Gamma"]) != m
         wing.sol["Gamma"] = zeros(m)
@@ -556,10 +574,30 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
                     fy_raw = clamp(Float64(fi[2]), -max_abs_force, max_abs_force)
                     fz_raw = clamp(Float64(fi[3]), -max_abs_force, max_abs_force)
                 else
-                    fz_raw = clamp(rho * magVinf * Γ, -max_abs_force, max_abs_force)
+                    Xcp = [row_wings[j]._xm[i], row_wings[j]._ym[i], row_wings[j]._zm[i]]
+                    Vloc = Vinf(Xcp, T)
+                    lvec = [
+                        row_wings[j]._xn[i+1] - row_wings[j]._xn[i],
+                        row_wings[j]._yn[i+1] - row_wings[j]._yn[i],
+                        row_wings[j]._zn[i+1] - row_wings[j]._zn[i],
+                    ]
+                    Fkj = rho * Γ * cross(Vloc, lvec)
+                    fx_raw = clamp(Fkj[1], -max_abs_force, max_abs_force)
+                    fy_raw = clamp(Fkj[2], -max_abs_force, max_abs_force)
+                    fz_raw = clamp(Fkj[3], -max_abs_force, max_abs_force)
                 end
             else
-                fz_raw = clamp(rho * magVinf * Γ, -max_abs_force, max_abs_force)
+                Xcp = [row_wings[j]._xm[i], row_wings[j]._ym[i], row_wings[j]._zm[i]]
+                Vloc = Vinf(Xcp, T)
+                lvec = [
+                    row_wings[j]._xn[i+1] - row_wings[j]._xn[i],
+                    row_wings[j]._yn[i+1] - row_wings[j]._yn[i],
+                    row_wings[j]._zn[i+1] - row_wings[j]._zn[i],
+                ]
+                Fkj = rho * Γ * cross(Vloc, lvec)
+                fx_raw = clamp(Fkj[1], -max_abs_force, max_abs_force)
+                fy_raw = clamp(Fkj[2], -max_abs_force, max_abs_force)
+                fz_raw = clamp(Fkj[3], -max_abs_force, max_abs_force)
             end
 
             fx = force_relax * fx_raw + (1 - force_relax) * forces_prev[i, j, 1]
@@ -624,12 +662,13 @@ runtime_pipeline = uns.concatenate(wake_treatment, coupling_runtime_function)
 uns.run_simulation(simulation, nsteps;
     Vinf=Vinf,
     rho=rho,
-    p_per_step=p_per_step,
-    max_particles=max_particles,
+    p_per_step=Int(p_per_step),
+    max_particles=Int(max_particles),
     sigma_vlm_solver=sigma_vlm_solver,
     sigma_vlm_surf=sigma_vlm_surf,
     sigma_rotor_surf=sigma_vlm_surf,
     sigma_vpm_overwrite=sigma_vpm_overwrite,
+    vpm_fmm=vpm_fmm_settings,
     shed_starting=shed_starting,
     shed_unsteady=true,
     unsteady_shedcrit=unsteady_shedcrit,
@@ -641,8 +680,8 @@ uns.run_simulation(simulation, nsteps;
     run_name=run_name,
     create_savepath=false,
     prompt=false,
-    nsteps_save=1,
-    save_horseshoes=true
+    nsteps_save=5,
+    save_horseshoes=false
 )
 
 close(sock)
