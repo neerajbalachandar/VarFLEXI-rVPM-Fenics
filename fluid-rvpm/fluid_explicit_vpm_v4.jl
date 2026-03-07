@@ -130,16 +130,16 @@ disp_scale_y     = 1.00           # debug alignment: apply full displacement
 disp_scale_z     = 1.00           # full normal update
 
 # 2D coupling grid (span x chord) used for socket data exchange
-n_chord_comm     = 5
-eta_chord_edges  = collect(range(0.0, 1.0; length=n_chord_comm+1))
+n_chord     = 5
+eta_chord_edges  = collect(range(0.0, 1.0; length=n_chord+1))
 eta_chord_cp     = [(eta_chord_edges[j] + 0.75*(eta_chord_edges[j+1]-eta_chord_edges[j]))
-                     for j in 1:n_chord_comm]
+                     for j in 1:n_chord]
 # Communication chord coordinates are the panel control-point locations.
 eta_chord_comm   = copy(eta_chord_cp)
 eta_chord_vortex = [(eta_chord_edges[j] + 0.25*(eta_chord_edges[j+1]-eta_chord_edges[j]))
-                     for j in 1:n_chord_comm]
-eta_chord_le     = [eta_chord_edges[j] for j in 1:n_chord_comm]
-eta_chord_te     = [eta_chord_edges[j+1] for j in 1:n_chord_comm]
+                     for j in 1:n_chord]
+eta_chord_le     = [eta_chord_edges[j] for j in 1:n_chord]
+eta_chord_te     = [eta_chord_edges[j+1] for j in 1:n_chord]
 
 Vinf(X,t) = magVinf*[1.0, 0.0, 0.0]
 
@@ -216,7 +216,7 @@ wing_template = make_cantilever_template(
 row_wings, row_wing_refs = split_wing_chordwise(wing_template, eta_chord_edges)
 
 system = vlm.WingSystem()
-for j in 1:n_chord_comm
+for j in 1:n_chord
     vlm.addwing(system, "WingRow$j", row_wings[j])
 end
 
@@ -443,8 +443,8 @@ flush(sock)
 m_span = vlm.get_m(row_wings[1])
 ys_ref = [row_wing_refs[1]._ym[i] for i in 1:m_span]
 eta_span_fluid = [clamp(ys_ref[i] / span, 0.0, 1.0) for i in 1:m_span]
-u_prev = zeros(Float64, m_span, n_chord_comm, 3)
-forces_prev = zeros(Float64, m_span, n_chord_comm, 3)
+u_prev = zeros(Float64, m_span, n_chord, 3)
+forces_prev = zeros(Float64, m_span, n_chord, 3)
 
 # Receive initial geometry from solid before launching the continuous run.
 msg0 = read_json_line(sock, "init")
@@ -458,7 +458,7 @@ u_prev .= u0
 u_vortex0 = sample_chordwise_fields(u0, eta_chord_comm, eta_chord_vortex)
 u_le0 = sample_chordwise_fields(u0, eta_chord_comm, eta_chord_le)
 u_te0 = sample_chordwise_fields(u0, eta_chord_comm, eta_chord_te)
-for j in 1:n_chord_comm
+for j in 1:n_chord
     update_geometry_absolute(
         row_wings[j], row_wing_refs[j],
         u0[:, j, :], u_vortex0[:, j, :], u_le0[:, j, :], u_te0[:, j, :]
@@ -478,8 +478,8 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     m = m_span
 
     # Extract panel forces directly from each chordwise row.
-    force2d = Vector{Vector{Float64}}(undef, m * n_chord_comm)
-    for j in 1:n_chord_comm
+    force2d = Vector{Vector{Float64}}(undef, m * n_chord)
+    for j in 1:n_chord
         if !haskey(row_wings[j].sol, "Gamma")
             row_wings[j].sol["Gamma"] = zeros(m)
         end
@@ -494,7 +494,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             forces_prev[i, j, 1] = 0.0
             forces_prev[i, j, 2] = 0.0
             forces_prev[i, j, 3] = fz
-            idx = (i - 1) * n_chord_comm + j
+            idx = (i - 1) * n_chord + j
             force2d[idx] = [0.0, 0.0, fz]
         end
     end
@@ -503,7 +503,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     write(sock, JSON.json(Dict(
         "step"=>step,
         "n_span"=>m,
-        "n_chord"=>n_chord_comm,
+        "n_chord"=>n_chord,
         "eta_span"=>eta_span_fluid,
         "eta_chord"=>eta_chord_comm,
         "force"=>force2d
@@ -527,7 +527,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         u_vortex = sample_chordwise_fields(u, eta_chord_comm, eta_chord_vortex)
         u_le = sample_chordwise_fields(u, eta_chord_comm, eta_chord_le)
         u_te = sample_chordwise_fields(u, eta_chord_comm, eta_chord_te)
-        for j in 1:n_chord_comm
+        for j in 1:n_chord
             update_geometry_absolute(
                 row_wings[j], row_wing_refs[j],
                 u[:, j, :], u_vortex[:, j, :], u_le[:, j, :], u_te[:, j, :]
