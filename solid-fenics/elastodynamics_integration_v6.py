@@ -25,10 +25,10 @@ nx, ny, nz = 32, 200, 8
 mesh = BoxMesh(Point(0.0, 0.0, -0.5), Point(1.0, span, 0.5), nx, ny, nz)
 span_strips = 200
 # Must match fluid-side panel count (fluid-rvpm/fluid_explicit_vpm.jl with n=50 -> m=100)
-n_span_comm = 100
+n_span = 100
 n_chord = 5
-m_panels_comm = n_span_comm * n_chord
-eta_span_comm = np.linspace(0.0, 1.0, n_span_comm)
+m_panels_comm = n_span * n_chord
+eta_span_comm = np.linspace(0.0, 1.0, n_span)
 eta_chord_edges = np.linspace(0.0, 1.0, n_chord + 1)
 eta_chord_comm = eta_chord_edges[:-1] + 0.75 * (eta_chord_edges[1:] - eta_chord_edges[:-1])
 
@@ -454,12 +454,12 @@ sock.sendall((json.dumps({"role": "solid"}) + "\n").encode())
 print("Solid connected.")
 
 # Communication discretization (must match fluid panel count)
-cp_nodes = extract_coupling_nodes(n_span_comm, n_chord, eta_chord_comm)
+cp_nodes = extract_coupling_nodes(n_span, n_chord, eta_chord_comm)
 np.savetxt(os.path.join(out_dir, "coupling_nodes.csv"), np.array(cp_nodes), delimiter=",", header="x,y,z", comments="")
 u_cp0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
 sock.sendall((json.dumps({
     "step": 0,
-    "n_span": n_span_comm,
+    "n_span": n_span,
     "n_chord": n_chord,
     "eta_span": eta_span_comm.tolist(),
     "eta_chord": eta_chord_comm.tolist(),
@@ -482,19 +482,19 @@ for i in range(Nsteps):
         raise RuntimeError("Coupling server disconnected while sending force data")
     data = json.loads(line)
     forces, used_2d_force = parse_force_payload(
-        data, n_span_comm, n_chord, eta_span_comm, eta_chord_comm
+        data, n_span, n_chord, eta_span_comm, eta_chord_comm
     )
     if not np.isfinite(forces).all():
         raise RuntimeError(f"Non-finite force data at solid step {i+1}")
     if len(forces) != m_panels_comm:
         print(f"Solid step {i+1}/{Nsteps}: force count mismatch (got {len(forces)}, expected {m_panels_comm}), resampling.")
         forces = resample_forces_to_shape(
-            forces, n_span_comm, n_chord,
+            forces, n_span, n_chord,
             eta_span_out=eta_span_comm, eta_chord_out=eta_chord_comm
         )
     if i == 0:
         if used_2d_force:
-            print(f"Solid: received 2D force payload ({n_span_comm}x{n_chord})")
+            print(f"Solid: received 2D force payload ({n_span}x{n_chord})")
         else:
             print("Solid: received legacy spanwise force payload and remapped to 2D grid")
 
@@ -506,7 +506,7 @@ for i in range(Nsteps):
         forces_eff = force_relax*forces + (1.0-force_relax)*forces_prev
     forces_prev = forces_eff.copy()
 
-    update_aero_traction(t_aero, forces_eff, n_span_comm, n_chord, eta_chord_comm)
+    update_aero_traction(t_aero, forces_eff, n_span, n_chord, eta_chord_comm)
 
     rhs_vec = assemble(L_form)
     bc.apply(rhs_vec)
@@ -552,7 +552,7 @@ for i in range(Nsteps):
 
         msg_geo = json.dumps({
             "step": i + 1,
-            "n_span": n_span_comm,
+            "n_span": n_span,
             "n_chord": n_chord,
             "eta_span": eta_span_comm.tolist(),
             "eta_chord": eta_chord_comm.tolist(),

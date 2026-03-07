@@ -1,5 +1,5 @@
 # Airfoil geometry with the new meshing and mapping and features chordwise and spanwise discretization and geometry superimposed, along with better and correct particle shedding
-
+# along with shedding stabilised fluid - v6
 from dolfin import *
 import numpy as np
 import matplotlib.pyplot as plt

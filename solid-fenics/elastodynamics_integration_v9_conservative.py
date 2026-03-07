@@ -1,5 +1,5 @@
 # Airfoil geometry with the new meshing and mapping and features chordwise and spanwise discretization and geometry superimposed, along with better and correct particle shedding
-
+# along with shedding stabilised fluid - v6
 from dolfin import *
 import numpy as np
 import matplotlib.pyplot as plt
@@ -31,6 +31,10 @@ m_panels_comm = n_span * n_chord
 eta_span_comm = np.linspace(0.0, 1.0, n_span)
 eta_chord_edges = np.linspace(0.0, 1.0, n_chord + 1)
 eta_chord_comm = eta_chord_edges[:-1] + 0.75 * (eta_chord_edges[1:] - eta_chord_edges[:-1])
+
+# Conservative coupling controls
+work_conservative_mode = True
+rbf_epsilon = 0.06
 
 
 def chord_at(y_val):
