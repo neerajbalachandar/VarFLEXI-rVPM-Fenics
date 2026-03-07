@@ -27,17 +27,17 @@ span_strips = 200
 # Must match fluid-side panel count (fluid-rvpm/fluid_explicit_vpm.jl with n=50 -> m=100)
 m_panels_comm = 100
 
-
+#interpolates chord length from root to wing tip
 def chord_at(y_val):
     eta = min(max(y_val / span, 0.0), 1.0)
     return root_chord + (tip_chord - root_chord) * eta
 
-
+#finds the leading edge position of the translated chords
 def x_leading_edge_at(y_val):
     eta = min(max(y_val / span, 0.0), 1.0)
     return leading_edge_sweep * eta
 
-
+#this only works on the x-z plane, where the rectangle in the x-z plane is converted in to half thickness airfoil
 def naca_half_thickness(xi):
     xi_clip = min(max(xi, 0.0), 1.0)
     return 5.0 * thickness_ratio * (
@@ -58,8 +58,8 @@ for i in range(coords.shape[0]):
     z_ref = coords[i, 2]
     chord = chord_at(y_val)
     x_le = x_leading_edge_at(y_val)
-    zeta = 2.0 * z_ref
-    half_t = max(chord * naca_half_thickness(xi), min_half_t)
+    zeta = 2.0 * z_ref #scale btwn [-1,1]
+    half_t = max(chord * naca_half_thickness(xi), min_half_t)#gives the half thickness shape of the slide for the airfoil
     coords[i, 0] = x_le + xi * chord
     coords[i, 2] = zeta * half_t
 
