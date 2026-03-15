@@ -12,12 +12,12 @@ parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
 T = 4.0                     # s
-Nsteps = 400
+Nsteps = 200
 dt_value = T/Nsteps
 dt = Constant(dt_value)
 
-span = 1.0                  # m
-root_chord = 0.12           # m
+span = 1.5                  # m
+root_chord = 0.20           # m
 tip_chord = 0.12            # m
 thickness_ratio = 0.12
 leading_edge_sweep = 0.0
@@ -25,12 +25,12 @@ leading_edge_sweep = 0.0
 # Speed-tuned mesh for interactive coupled runs.
 nx, ny, nz = 12, 120, 6
 
-mesh = BoxMesh(Point(0.0, 0.0, -1.5e-3), Point(1.0, span, 1.5e-3), nx, ny, nz)
+mesh = BoxMesh(Point(0.0, 0.0, -0.5), Point(1.0, span, 0.5), nx, ny, nz)
 # span_strips = 200
 
 # Match fluid panels - rectangular meshes, projected meshes
 n_span = 80
-n_chord = 8
+n_chord = 12
 
 
 # Solid sends geometry with n_span, n_chord, eta_span, eta_chordas flattened 1D arrays, two for locating and two for parametrizing
@@ -43,12 +43,14 @@ eta_chord_comm = eta_chord_edges[:-1] + 0.75 * (eta_chord_edges[1:] - eta_chord_
 
 # Conservative coupling controls
 work_conservative_mode = True # Can we use both at once, relaxation and conservation?
-rbf_epsilon = 1.0 # shape parameter of local Gaussian RBF for conservative mapping - was 0.06
+rbf_epsilon = 0.06 # shape parameter of local Gaussian RBF for conservative mapping
 aoa_deg = 8.0 # deg
 
-# Work-conservation convergence test
-work_rel_tol = 1.0e-3
-work_conv_window = 10
+# Prescribed root flapping motion (about x-axis at y=0)
+flap_amp_deg = 40.0
+flap_freq_hz = 2.0
+flap_phase = 0.0
+flap_ramp_time = 0.5  # s, smooth ramp-in to avoid a hard first-step jump
 
 
 def chord_at(y_val):
@@ -133,8 +135,8 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0)
 t_aero = Function(Vt, name="AerodynamicTraction")
 
 # Problem Defn (SI)
-E = 6.8e10
-nu = 0.35
+E = 7.0e9
+nu = 0.33
 mu = Constant(E/(2.0*(1.0+nu)))
 lmbda = Constant(E*nu/((1.0+nu)*(1.0-2.0*nu)))
 rho_s = 1600.0               # kg/m^3
@@ -152,36 +154,67 @@ print(
     f"E={E:.3e} Pa, rho_s={rho_s} kg/m^3, AoA={aoa_deg} deg"
 )
 
-du = TrialFunction(V)
+du_trial = TrialFunction(V)
 u_ = TestFunction(V)
 u = Function(V, name="Displacement")
 u_old = Function(V)
 v_old = Function(V)
 a_old = Function(V)
 
-zero = Constant((0.0,0.0,0.0))
-bc = DirichletBC(V, zero, left) # BC defined on the left boundary
+class RootFlapBC(UserExpression):
+    def __init__(self, theta=0.0, **kwargs):
+        super().__init__(**kwargs)
+        self.theta = float(theta)
 
-# Linear model, needs to be changed ---------------------------------------------------HIGH PRIORITY--------------------------------------------------------------
-#strain tensor
-def sigma(r):
-    return 2.0*mu*sym(grad(r)) + lmbda*tr(sym(grad(r)))*Identity(len(r))
+    def eval(self, values, x):
+        cth = np.cos(self.theta)
+        sth = np.sin(self.theta)
+        y0 = x[1]
+        z0 = x[2]
+        values[0] = 0.0
+        values[1] = y0 * cth - z0 * sth - y0
+        values[2] = y0 * sth + z0 * cth - z0
 
-#mass form
-def m(u, u_):
-    return rho*inner(u, u_)*dx
+    def value_shape(self):
+        return (3,)
 
-#elastic stiffness form
-def k(u, u_):
-    return inner(sigma(u), sym(grad(u_)))*dx
+flap_amp = flap_amp_deg * np.pi / 180.0
+flap_bc_expr = RootFlapBC(theta=0.0, degree=1)
+bc = DirichletBC(V, flap_bc_expr, left)
+bc_hom = DirichletBC(V, Constant((0.0, 0.0, 0.0)), left)
 
-#damping
-def c(u, u_):
-    return eta_m*m(u, u_) + eta_k*k(u, u_)
+print(
+    f"Flapping BC: amp={flap_amp_deg} deg, freq={flap_freq_hz} Hz, phase={flap_phase} rad"
+)
 
-#work energy form
-def Wext(u_):
-    return dot(u_, t_aero) * ds_aero(5)
+def sigma_lin(r):
+    return 2.0 * mu * sym(grad(r)) + lmbda * tr(sym(grad(r))) * Identity(len(r))
+
+def m_form(u_val, u_test):
+    return rho * inner(u_val, u_test) * dx
+
+def c_form(u_val, u_test):
+    return eta_m * m_form(u_val, u_test) + eta_k * inner(sigma_lin(u_val), sym(grad(u_test))) * dx
+
+def Wext(u_test):
+    return dot(u_test, t_aero) * ds_aero(5)
+
+def psi_hyperelastic(w):
+    I = Identity(mesh.geometry().dim())
+    F = I + grad(w)
+    C = F.T * F
+    Ic = tr(C)
+    J = det(F)
+    J_safe = conditional(gt(J, 1.0e-9), J, 1.0e-9)
+    return (mu / 2.0) * (Ic - 3.0 - 2.0 * ln(J_safe)) + (lmbda / 2.0) * (ln(J_safe) ** 2)
+
+def sigma_cauchy(w):
+    I = Identity(mesh.geometry().dim())
+    F = I + grad(w)
+    b = F * F.T
+    J = det(F)
+    J_safe = conditional(gt(J, 1.0e-9), J, 1.0e-9)
+    return (mu / J_safe) * (b - I) + (lmbda * ln(J_safe) / J_safe) * I
 
 def update_a(u, u_old, v_old, a_old, ufl=True):
     if ufl:
@@ -217,22 +250,17 @@ def update_fields(u, u_old, v_old, a_old):
 def avg(x_old, x_new, alpha):
     return alpha*x_old + (1-alpha)*x_new
 
-a_new = update_a(du, u_old, v_old, a_old, ufl=True)
+a_new = update_a(u, u_old, v_old, a_old, ufl=True)
 v_new = update_v(a_new, u_old, v_old, a_old, ufl=True)
 
-res = m(avg(a_old, a_new, alpha_m), u_) \
-    + c(avg(v_old, v_new, alpha_f), u_) \
-    + k(avg(u_old, du, alpha_f), u_) \
+u_alpha = avg(u_old, u, alpha_f)
+
+Pi_int = psi_hyperelastic(u_alpha) * dx
+res = m_form(avg(a_old, a_new, alpha_m), u_) \
+    + c_form(avg(v_old, v_new, alpha_f), u_) \
+    + derivative(Pi_int, u, u_) \
     - Wext(u_)
-
-# See printing residuals --------------------------
-
-a_form = lhs(res)
-L_form = rhs(res)
-
-K, _ = assemble_system(a_form, L_form, bc)
-solver = LUSolver(K, "mumps")
-solver.parameters["symmetric"] = True
+jac_form = derivative(res, u, du_trial)
 
 # What is this? and should we try printing it?
 panel_node_cache = {}
@@ -403,7 +431,7 @@ def update_aero_traction(t_aero, forces, n_span, n_chord, eta_chord):
             continue
         fx, fy, fz = forces[panel_idx]
         i_span = panel_idx // n_chord
-        j_chord = panel_idx % n_chordnbr_ids, nbr_
+        j_chord = panel_idx % n_chord
 
         y_mid = (i_span + 0.5) * span / n_span
         c_mid = chord_at(y_mid)
@@ -529,8 +557,6 @@ def extract_coupling_node_indices(n_span, n_chord, eta_chord, coords):
     ids = idx.astype(np.int64).tolist()
     return np.asarray(ids, dtype=np.int64)
 
-# Is this for the continuous distribution of forces mapped in the solid solver 
-# from the fluid solver using RBFs
 def build_local_rbf_map(fluid_points, solid_points, epsilon, n_neighbors=32):
     fluid_points = np.asarray(fluid_points, dtype=float)
     solid_points = np.asarray(solid_points, dtype=float)
@@ -555,7 +581,6 @@ def build_local_rbf_map(fluid_points, solid_points, epsilon, n_neighbors=32):
     row_sum = np.maximum(row_sum, 1e-16)
     nbr_w /= row_sum
     return nbr_ids, nbr_w
-
 
 def map_displacements_to_fluid(u_nodes, nbr_ids, nbr_w):
     n_f, k = nbr_ids.shape
@@ -597,13 +622,15 @@ def get_nodal_displacements(u_fun, node_ids, dofs_x, dofs_y, dofs_z):
     out[:, 2] = u_arr[dofs_z[node_ids]]
     return out
 
-def add_nodal_forces_to_rhs(rhs_vec, nodal_forces, node_ids, dofs_x, dofs_y, dofs_z):
-    arr = rhs_vec.get_local()
-    arr[dofs_x[node_ids]] += nodal_forces[:, 0]
-    arr[dofs_y[node_ids]] += nodal_forces[:, 1]
-    arr[dofs_z[node_ids]] += nodal_forces[:, 2]
-    rhs_vec.set_local(arr)
-    rhs_vec.apply("insert")
+def apply_nodal_forces_to_residual(res_vec, nodal_forces, node_ids, dofs_x, dofs_y, dofs_z):
+    # Residual uses internal - external convention, so mapped external nodal
+    # forces are subtracted.
+    arr = res_vec.get_local()
+    arr[dofs_x[node_ids]] -= nodal_forces[:, 0]
+    arr[dofs_y[node_ids]] -= nodal_forces[:, 1]
+    arr[dofs_z[node_ids]] -= nodal_forces[:, 2]
+    res_vec.set_local(arr)
+    res_vec.apply("insert")
 
 def local_project(v, V, u=None):
     dv = TrialFunction(V)
@@ -619,11 +646,53 @@ def local_project(v, V, u=None):
     else:
         solver.solve_local_rhs(u)
 
+def solve_nonlinear_step(nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, dofs_u_z,
+                         max_iters=40, tol_res_abs=1.0e-6, tol_res_rel=1.0e-6, tol_inc=1.0e-8):
+    # Start Newton from previous converged state at current step.
+    u.vector()[:] = u_old.vector()
+    bc.apply(u.vector())
+
+    du_corr = Function(V)
+    converged = False
+    res_norm = None
+    res0 = None
+    for it in range(1, max_iters + 1):
+        res_vec = assemble(res)
+        if work_conservative_mode and nodal_forces is not None:
+            apply_nodal_forces_to_residual(
+                res_vec, nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, dofs_u_z
+            )
+
+        bc_hom.apply(res_vec)
+        res_norm = res_vec.norm("l2")
+        if res0 is None:
+            res0 = max(res_norm, 1.0e-16)
+        res_target = max(tol_res_abs, tol_res_rel * res0)
+        if res_norm < res_target:
+            converged = True
+            break
+
+        jac_mat = assemble(jac_form)
+        bc_hom.apply(jac_mat)
+
+        rhs_newton = res_vec.copy()
+        rhs_newton *= -1.0
+        solve(jac_mat, du_corr.vector(), rhs_newton, "mumps")
+
+        u.vector().axpy(1.0, du_corr.vector())
+        bc.apply(u.vector())
+
+        if du_corr.vector().norm("l2") < tol_inc and res_norm < 10.0 * res_target:
+            converged = True
+            break
+
+    return converged, it, res_norm if res_norm is not None else 0.0
+
 sig = Function(Vsig, name="sigma") # Stress output field
 
 out_dir = "../results"
 os.makedirs(out_dir, exist_ok=True)
-xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
+xdmf_path = os.path.join(out_dir, "elastodynamics-results-v10-nonlinear-flap.xdmf")
 xdmf_file = XDMFFile(xdmf_path)
 xdmf_file.parameters["flush_output"] = True
 xdmf_file.parameters["functions_share_mesh"] = True
@@ -644,7 +713,7 @@ print("Building interface node sets...")
 aero_node_ids, outer_surface_coords = get_aero_surface_node_ids()
 # Control point of the cells in the surface linked to the nearest node
 cp_node_ids = extract_coupling_node_indices(n_span, n_chord, eta_chord_comm, outer_surface_coords)
-
+# 
 cp_nodes = outer_surface_coords[cp_node_ids, :]
 np.savetxt(os.path.join(out_dir, "coupling_nodes.csv"), cp_nodes, delimiter=",", header="x,y,z", comments="")
 print(f"Interface nodes ready: aero={len(aero_node_ids)}, coupling={len(cp_node_ids)}")
@@ -655,24 +724,17 @@ print(f"Interface nodes ready: aero={len(aero_node_ids)}, coupling={len(cp_node_
 interface_node_ids = aero_node_ids
 interface_coords = outer_surface_coords[interface_node_ids, :]
 print("Building local RBF transfer map...")
-# Fluid points are coordinates of control points in the fluid, interface coords being the global coordinates of the nodes
-# in the solid domain, both are used for the rbf map wherein the relation is established as k neighbours for 
-# finding the nbr ids and coordinates
 nbr_ids, nbr_w = build_local_rbf_map(cp_nodes, interface_coords, rbf_epsilon, n_neighbors=16)
 print(f"Conservative mapping: {cp_nodes.shape[0]} fluid points <- {interface_coords.shape[0]} solid interface nodes")
 
-# Explicit operators:
+# Explicit operators used in paper-style formulation:
 #   u_f = T_u u_s
 #   F_s = T_f F_f, with T_f = S^{-1} T_u^T A
 # Here aerodynamic payload is panel-total force, so A = I.
 A_diag = np.ones((cp_nodes.shape[0],), dtype=float)
-# How is the S calculated?
 S_lumped = compute_S_lumped(len(interface_node_ids), nbr_ids, nbr_w, A_diag)
 print(f"Operator setup: A=I ({len(A_diag)} dofs), S_lumped min/max = {S_lumped.min():.3e}/{S_lumped.max():.3e}")
 
-# Dof indices of displacement in x,y,z directions as in the solid solver
-# To read/write nodal vectors per component (for mapping and force insertion),
-# code needs exact index lists for each component.
 dofs_u_x = np.asarray(V.sub(0).dofmap().dofs(), dtype=np.int64)
 dofs_u_y = np.asarray(V.sub(1).dofmap().dofs(), dtype=np.int64)
 dofs_u_z = np.asarray(V.sub(2).dofmap().dofs(), dtype=np.int64)
@@ -698,12 +760,9 @@ print("Initial geometry sent.")
 time = np.linspace(0, T, Nsteps+1)
 u_tip = np.zeros((Nsteps+1,))
 energies = np.zeros((Nsteps+1,4))
-E_damp = 0.5 # Damping increased from 0
-force_relax = 1.0 if work_conservative_mode else 0.20 # What is the way around for conservative work using relaxation?
+E_damp = 0
+force_relax = 1.0 if work_conservative_mode else 0.20
 forces_prev = None
-work_rel_errors = np.full((Nsteps,), np.nan, dtype=float)
-work_Wf = np.full((Nsteps,), np.nan, dtype=float)
-work_Ws = np.full((Nsteps,), np.nan, dtype=float)
 
 for i in range(Nsteps):
     print(f"Solid step {i+1}/{Nsteps}: waiting for force...")
@@ -739,6 +798,14 @@ for i in range(Nsteps):
 
     nodal_forces = None
     Fs_coeff = None
+
+    t = time[i+1]
+    ramp = 1.0 if flap_ramp_time <= 0.0 else min(1.0, t / flap_ramp_time)
+    flap_theta = ramp * flap_amp * np.sin(2.0 * np.pi * flap_freq_hz * t + flap_phase)
+    flap_bc_expr.theta = float(flap_theta)
+    if i == 0 or (i + 1) % 20 == 0:
+        print(f"Flap state step {i+1}: theta={flap_theta*180.0/np.pi:.3f} deg (ramp={ramp:.3f})")
+
     if work_conservative_mode:
         Fs_coeff, nodal_forces = apply_Tf_operator(
             forces_eff, len(interface_node_ids), nbr_ids, nbr_w, A_diag, S_lumped
@@ -752,41 +819,34 @@ for i in range(Nsteps):
         Wf = float(np.sum(u_cp_prev * (forces_eff * A_diag[:, None])))
         Ws = float(np.sum(u_nodes_prev * (Fs_coeff * S_lumped[:, None])))
         rel_work_err = abs(Wf - Ws) / max(abs(Wf), abs(Ws), 1e-16)
-        work_rel_errors[i] = rel_work_err
-        work_Wf[i] = Wf
-        work_Ws[i] = Ws
         if i == 0 or (i + 1) % 20 == 0:
             print(f"Work audit step {i+1}: Wf={Wf:.6e}, Ws={Ws:.6e}, rel_err={rel_work_err:.3e}")
     else:
         update_aero_traction(t_aero, forces_eff, n_span, n_chord, eta_chord_comm)
 
-    rhs_vec = assemble(L_form)
-    if work_conservative_mode and nodal_forces is not None:
-        add_nodal_forces_to_rhs(rhs_vec, nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, dofs_u_z)
-    bc.apply(rhs_vec)
-    try:
-        solver.solve(K, u.vector(), rhs_vec)
-    except RuntimeError as err:
-        print(f"Primary linear solve failed at solid step {i+1}/{Nsteps}: {err}")
-        print("Retrying with freshly assembled matrix and direct LU.")
-        K_retry, _ = assemble_system(a_form, L_form, bc)
-        solve(K_retry, u.vector(), rhs_vec, "lu")
+    ok, nit, rnorm = solve_nonlinear_step(
+        nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, dofs_u_z
+    )
+    if not ok:
+        raise RuntimeError(
+            f"Nonlinear solve failed to converge at step {i+1}/{Nsteps} (iters={nit}, residual={rnorm:.3e})"
+        )
+    if i == 0 or (i + 1) % 20 == 0:
+        print(f"Nonlinear solver step {i+1}: iters={nit}, residual={rnorm:.3e}")
 
     update_fields(u, u_old, v_old, a_old)
 
-    t = time[i+1]
-
     xdmf_file.write(u, t)
-    local_project(sigma(u), Vsig, sig)
+    local_project(sigma_cauchy(u), Vsig, sig)
     xdmf_file.write(sig, t)
 
-    E_elas = assemble(0.5*k(u_old, u_old))
-    E_kin = assemble(0.5*m(v_old, v_old))
-    E_damp += dt_value*assemble(c(v_old, v_old))
+    E_elas = assemble(psi_hyperelastic(u_old) * dx)
+    E_kin = assemble(0.5 * rho * inner(v_old, v_old) * dx)
+    E_damp += dt_value * assemble(c_form(v_old, v_old))
     E_tot = E_elas + E_kin + E_damp
 
     energies[i+1,:] = np.array([E_elas,E_kin,E_damp,E_tot])
-    u_tip[i+1] = u(0.05,1.0,0.0)[1]
+    u_tip[i+1] = u(0.05, span, 0.0)[2]
 
     # Send geometry for the next fluid step (not needed after final force).
     if i < Nsteps - 1:
@@ -826,41 +886,11 @@ sock.close()
 print("Solid solver finished.")
 print(f"Solid field outputs: {xdmf_path}")
 
-if work_conservative_mode:
-    valid = np.isfinite(work_rel_errors)
-    if np.any(valid):
-        errs = work_rel_errors[valid]
-        i_last = np.where(valid)[0][-1]
-        final_err = float(errs[-1])
-        max_err = float(np.max(errs))
-        mean_err = float(np.mean(errs))
-        w = min(work_conv_window, len(errs))
-        tail = errs[-w:]
-        tail_max = float(np.max(tail))
-        tail_mean = float(np.mean(tail))
-        conserved = tail_max <= work_rel_tol
-
-        print(
-            "Work conservation summary: "
-            f"final={final_err:.3e}, mean={mean_err:.3e}, max={max_err:.3e}, "
-            f"tail({w}) mean={tail_mean:.3e}, tail({w}) max={tail_max:.3e}, "
-            f"tol={work_rel_tol:.1e}"
-        )
-        if conserved:
-            print(f"Work conservation converged over last {w} steps.")
-        else:
-            print(
-                f"WARNING: Work conservation NOT converged over last {w} steps "
-                f"(tail max {tail_max:.3e} > tol {work_rel_tol:.1e})."
-            )
-    else:
-        print("WARNING: No valid work-audit samples were collected.")
-
 plt.figure()
 plt.plot(time,u_tip)
 plt.xlabel("Time")
-plt.ylabel("Tip displacement")
-tip_plot = os.path.join(out_dir, "tip_displacement.png")
+plt.ylabel("Tip displacement (z)")
+tip_plot = os.path.join(out_dir, "tip_displacement_v10_nonlinear_flap.png")
 plt.savefig(tip_plot, dpi=150)
 plt.show()
 
@@ -869,7 +899,7 @@ plt.plot(time,energies)
 plt.legend(("elastic","kinetic","damping","total"))
 plt.xlabel("Time")
 plt.ylabel("Energy")
-energy_plot = os.path.join(out_dir, "energies.png")
+energy_plot = os.path.join(out_dir, "energies_v10_nonlinear_flap.png")
 plt.savefig(energy_plot, dpi=150)
 plt.show()
 print(f"Saved plots: {tip_plot}, {energy_plot}")

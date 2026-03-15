@@ -1,8 +1,24 @@
 import socket
 import json
+import os
+import errno
+import subprocess
 
-HOST = "127.0.0.1"
-PORT = 9000
+HOST = os.getenv("COUPLING_HOST", "127.0.0.1")
+PORT = int(os.getenv("COUPLING_PORT", "9000"))
+
+def port_owner_hint(port):
+    try:
+        out = subprocess.check_output(
+            ["fuser", "-v", f"{port}/tcp"],
+            stderr=subprocess.STDOUT,
+            text=True,
+        ).strip()
+        if out:
+            return out
+    except Exception:
+        pass
+    return "Unable to query owner (try: `fuser -v {}/tcp`)".format(port)
 
 def read_json_line(stream, name):
     line = stream.readline()
@@ -33,7 +49,17 @@ print("Starting coupling server...")
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind((HOST, PORT))
+try:
+    server.bind((HOST, PORT))
+except OSError as err:
+    if err.errno == errno.EADDRINUSE:
+        raise RuntimeError(
+            f"Port {PORT} is already in use on {HOST}.\n"
+            f"{port_owner_hint(PORT)}\n"
+            f"Stop the old process or run with another port:\n"
+            f"`COUPLING_PORT=<port> python3 coupling.py`"
+        ) from err
+    raise
 server.listen(2)
 
 fluid_conn, fluid_file = None, None
