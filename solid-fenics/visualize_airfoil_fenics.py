@@ -8,13 +8,13 @@ parameters["form_compiler"]["optimize"] = True
 # Geometry settings (must match elastodynamics_integration_v4.py mapping)
 span = 1.0
 root_chord = 0.12
-tip_chord = 0.08
+tip_chord = 0.05
 thickness_ratio = 0.12
 leading_edge_sweep = 0.0
 
 nx, ny, nz = 32, 200, 8
 span_strips = 200
-
+mesh = BoxMesh(Point(0.0, 0.0, -0.5), Point(1.0, span, 0.5), nx, ny, nz)
 
 def chord_at(y_val):
     eta = min(max(y_val / span, 0.0), 1.0)
@@ -37,26 +37,11 @@ def naca_half_thickness(xi):
     )
 
 
-mesh = BoxMesh(Point(0.0, 0.0, -0.5), Point(1\section{Validation, Computation and Results}
-￼
-\begin{frame}{Results}
-￼
-\centering
-\textbf{Tip Displacement}
-￼
-\vspace{0.1cm}
-￼
-\includegraphics[width=0.35\linewidth]{images/tip_disp_v3.png}
-￼
-\vspace{0.1cm}
-￼
-\textbf{Energy Evolution}
-￼
-\vspace{0.1cm}
-￼
-\includegraphics[width=0.85\linewidth]{images/energy_v3.png}
-￼
-\end{frame}.0, span, 0.5), nx, ny, nz)
+
+aoa_deg = 45.0
+theta = np.deg2rad(aoa_deg)
+R = np.array([[np.cos(theta), 0.0, np.sin(theta)],[0.0, 1.0, 0.0],[-np.sin(theta), 0.0, np.cos(theta)]])
+
 coords = mesh.coordinates()
 for i in range(coords.shape[0]):
     xi = coords[i, 0]
@@ -66,8 +51,12 @@ for i in range(coords.shape[0]):
     x_le = x_leading_edge_at(y_val)
     zeta = 2.0 * z_ref
     half_t = chord * naca_half_thickness(xi)
-    coords[i, 0] = x_le + xi * chord
-    coords[i, 2] = zeta * half_t
+
+    x0 = x_le + xi * chord
+    y0 = y_val
+    z0 = zeta * half_t
+    #add the transformed coordinates the new mesh
+    coords[i, :] = R.dot(np.array([x0, y0, z0]))
 
 panel_tol_x = 0.75 * (root_chord / nx)
 panel_tol_z = 1.25 * (root_chord * thickness_ratio / nz)
