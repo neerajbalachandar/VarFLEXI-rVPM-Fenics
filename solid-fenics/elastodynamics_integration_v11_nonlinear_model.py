@@ -32,9 +32,8 @@ mesh = BoxMesh(Point(0.0, 0.0, -1.5e-3), Point(1.0, span, 1.5e-3), nx, ny, nz)
 n_span = 80
 n_chord = 8
 
-
 # Solid sends geometry with n_span, n_chord, eta_span, eta_chordas flattened 1D arrays, two for locating and two for parametrizing
-m_panels_comm = n_span * n_chord
+m_panels_comm = n_span*n_chord
 eta_span_comm = np.linspace(0.0, 1.0, n_span)
 
 # expand...
@@ -170,22 +169,60 @@ a_old = Function(V)
 zero = Constant((0.0,0.0,0.0))
 bc = DirichletBC(V, zero, left) # BC defined on the left boundary
 
-# Linear model, needs to be changed ---------------------------------------------------HIGH PRIORITY--------------------------------------------------------------
-#strain tensor
-def sigma(r):
-    return 2.0*mu*sym(grad(r)) + lmbda*tr(sym(grad(r)))*Identity(len(r))
+I = Identity(mesh.geometry().dim())
+
+
+def sigma_linear(r):
+    eps = sym(grad(r))
+    return 2.0 * mu * eps + lmbda * tr(eps) * I
+
+
+def deformation_gradient(r):
+    return I + grad(r)
+
+
+def green_lagrange_strain(r):
+    F = deformation_gradient(r)
+    C = F.T * F
+    return 0.5 * (C - I)
+
+
+def strain_energy_density(r):
+    E_gl = green_lagrange_strain(r)
+    return 0.5 * lmbda * tr(E_gl) ** 2 + mu * tr(E_gl * E_gl)
+
+
+def second_pk_stress(r):
+    E_gl = green_lagrange_strain(r)
+    return lmbda * tr(E_gl) * I + 2.0 * mu * E_gl
+
+
+def first_pk_stress(r):
+    F = deformation_gradient(r)
+    S = second_pk_stress(r)
+    return F * S
+
+
+def cauchy_stress(r):
+    F = deformation_gradient(r)
+    J = det(F)
+    S = second_pk_stress(r)
+    return (1.0 / J) * F * S * F.T
 
 #mass form
 def m(u, u_):
     return rho*inner(u, u_)*dx
 
-#elastic stiffness form
-def k(u, u_):
-    return inner(sigma(u), sym(grad(u_)))*dx
+def k_lin(u, u_):
+    return inner(sigma_linear(u), sym(grad(u_)))*dx
+
+
+def internal_virtual_work(r, u_):
+    return inner(first_pk_stress(r), grad(u_)) * dx
 
 #damping
 def c(u, u_):
-    return eta_m*m(u, u_) + eta_k*k(u, u_)
+    return eta_m*m(u, u_) + eta_k*k_lin(u, u_)
 
 #work energy form
 def Wext(u_):
@@ -225,22 +262,54 @@ def update_fields(u, u_old, v_old, a_old):
 def avg(x_old, x_new, alpha):
     return alpha*x_old + (1-alpha)*x_new
 
-a_new = update_a(du, u_old, v_old, a_old, ufl=True)
+a_new = update_a(u, u_old, v_old, a_old, ufl=True)
 v_new = update_v(a_new, u_old, v_old, a_old, ufl=True)
+
+u_alpha = avg(u_old, u, alpha_f)
 
 res = m(avg(a_old, a_new, alpha_m), u_) \
     + c(avg(v_old, v_new, alpha_f), u_) \
-    + k(avg(u_old, du, alpha_f), u_) \
+    + internal_virtual_work(u_alpha, u_) \
     - Wext(u_)
 
-# See printing residuals --------------------------
+jac = derivative(res, u, du)
 
-a_form = lhs(res)
-L_form = rhs(res)
+newton_abs_tol = 1.0e-8
+newton_rel_tol = 1.0e-7
+newton_max_iters = 20
 
-K, _ = assemble_system(a_form, L_form, bc)
-solver = LUSolver(K, "mumps")
-solver.parameters["symmetric"] = True
+
+def solve_nonlinear_step(u, jac_form, res_form, bc, ext_force_vec=None):
+    bc.apply(u.vector())
+
+    residual_norm0 = None
+    du_step = Function(V)
+
+    for it in range(newton_max_iters):
+        A = assemble(jac_form)
+        residual_vec = assemble(res_form)
+        if ext_force_vec is not None:
+            residual_vec.axpy(-1.0, ext_force_vec)
+        bc.apply(A, residual_vec, u.vector())
+
+        residual_norm = residual_vec.norm("l2")
+        if residual_norm0 is None:
+            residual_norm0 = max(residual_norm, 1.0)
+        rel_norm = residual_norm / residual_norm0
+
+        if residual_norm <= newton_abs_tol or rel_norm <= newton_rel_tol:
+            return it, residual_norm, rel_norm
+
+        rhs = residual_vec.copy()
+        rhs *= -1.0
+        solve(A, du_step.vector(), rhs, "mumps")
+        u.vector().axpy(1.0, du_step.vector())
+        bc.apply(u.vector())
+
+    raise RuntimeError(
+        f"Newton solver failed after {newton_max_iters} iterations "
+        f"(abs={residual_norm:.3e}, rel={rel_norm:.3e})"
+    )
 
 # What is this? and should we try printing it?
 panel_node_cache = {}
@@ -411,7 +480,7 @@ def update_aero_traction(t_aero, forces, n_span, n_chord, eta_chord):
             continue
         fx, fy, fz = forces[panel_idx]
         i_span = panel_idx // n_chord
-        j_chord = panel_idx % n_chordnbr_ids, nbr_
+        j_chord = panel_idx % n_chord
 
         y_mid = (i_span + 0.5) * span / n_span
         c_mid = chord_at(y_mid)
@@ -712,6 +781,8 @@ forces_prev = None
 work_rel_errors = np.full((Nsteps,), np.nan, dtype=float)
 work_Wf = np.full((Nsteps,), np.nan, dtype=float)
 work_Ws = np.full((Nsteps,), np.nan, dtype=float)
+ext_force_vec_template = u.vector().copy()
+ext_force_vec_template.zero()
 
 for i in range(Nsteps):
     print(f"Solid step {i+1}/{Nsteps}: waiting for force...")
@@ -768,27 +839,31 @@ for i in range(Nsteps):
     else:
         update_aero_traction(t_aero, forces_eff, n_span, n_chord, eta_chord_comm)
 
-    rhs_vec = assemble(L_form)
+    ext_force_vec = None
     if work_conservative_mode and nodal_forces is not None:
-        add_nodal_forces_to_rhs(rhs_vec, nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, dofs_u_z)
-    bc.apply(rhs_vec)
+        ext_force_vec = ext_force_vec_template.copy()
+        ext_force_vec.zero()
+        add_nodal_forces_to_rhs(ext_force_vec, nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, dofs_u_z)
     try:
-        solver.solve(K, u.vector(), rhs_vec)
+        n_it, abs_res, rel_res = solve_nonlinear_step(u, jac, res, bc, ext_force_vec=ext_force_vec)
     except RuntimeError as err:
-        print(f"Primary linear solve failed at solid step {i+1}/{Nsteps}: {err}")
-        print("Retrying with freshly assembled matrix and direct LU.")
-        K_retry, _ = assemble_system(a_form, L_form, bc)
-        solve(K_retry, u.vector(), rhs_vec, "lu")
+        raise RuntimeError(f"Nonlinear solid solve failed at step {i+1}/{Nsteps}: {err}")
+
+    if i == 0 or (i + 1) % 20 == 0:
+        print(
+            f"Solid step {i+1}/{Nsteps}: Newton converged in {n_it} iterations "
+            f"(abs={abs_res:.3e}, rel={rel_res:.3e})"
+        )
 
     update_fields(u, u_old, v_old, a_old)
 
     t = time[i+1]
 
     xdmf_file.write(u, t)
-    local_project(sigma(u), Vsig, sig)
+    local_project(cauchy_stress(u), Vsig, sig)
     xdmf_file.write(sig, t)
 
-    E_elas = assemble(0.5*k(u_old, u_old))
+    E_elas = assemble(strain_energy_density(u_old)*dx)
     E_kin = assemble(0.5*m(v_old, v_old))
     E_damp += dt_value*assemble(c(v_old, v_old))
     E_tot = E_elas + E_kin + E_damp
