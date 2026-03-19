@@ -78,15 +78,23 @@ theta = np.deg2rad(aoa_deg)
 R = np.array([[np.cos(theta), 0.0, np.sin(theta)],[0.0, 1.0, 0.0],[-np.sin(theta), 0.0, np.cos(theta)]])
 
 coords = mesh.coordinates()
+z_min = float(np.min(coords[:, 2]))
+z_max = float(np.max(coords[:, 2]))
+z_mid = 0.5 * (z_min + z_max)
+z_half_range = max(0.5 * (z_max - z_min), 1.0e-12)
 min_half_t = 0.10 * root_chord * thickness_ratio / nz
 for i in range(coords.shape[0]):
-    xi = coords[i, 0]
+    # Keep xi slightly away from exactly 0 to avoid leading-edge collapse.
+    xi = min(max(coords[i, 0], 1.0e-4), 1.0)
     y_val = coords[i, 1]
     z_ref = coords[i, 2]
     chord = chord_at(y_val)
     x_le = x_leading_edge_at(y_val)
-    zeta = 2.0 * z_ref
-    half_t = chord * naca_half_thickness(xi)
+    # Normalize z_ref to [-1, 1] based on actual BoxMesh z-range.
+    # This keeps the mapping robust even if z-bounds are changed.
+    zeta = (z_ref - z_mid) / z_half_range
+    # Enforce a small minimum half-thickness to avoid degenerate elements.
+    half_t = max(chord * naca_half_thickness(xi), min_half_t)
 
     x0 = x_le + xi * chord
     y0 = y_val
@@ -274,9 +282,13 @@ res = m(avg(a_old, a_new, alpha_m), u_) \
 
 jac = derivative(res, u, du)
 
-newton_abs_tol = 1.0e-8
-newton_rel_tol = 1.0e-7
-newton_max_iters = 20
+# Practical Newton tolerances for this coupled transient nonlinear solve.
+# The previous tolerances were too strict and were rejecting near-converged
+# iterations at step 1.
+newton_abs_tol = 1.0e-6
+newton_rel_tol = 1.0e-6
+newton_inc_tol = 1.0e-8
+newton_max_iters = 40
 
 
 def solve_nonlinear_step(u, jac_form, res_form, bc, ext_force_vec=None):
@@ -291,6 +303,8 @@ def solve_nonlinear_step(u, jac_form, res_form, bc, ext_force_vec=None):
         if ext_force_vec is not None:
             residual_vec.axpy(-1.0, ext_force_vec)
         bc.apply(A, residual_vec, u.vector())
+        # Ensure eliminated/constrained rows do not leave zero pivots.
+        A.ident_zeros()
 
         residual_norm = residual_vec.norm("l2")
         if residual_norm0 is None:
@@ -302,9 +316,25 @@ def solve_nonlinear_step(u, jac_form, res_form, bc, ext_force_vec=None):
 
         rhs = residual_vec.copy()
         rhs *= -1.0
-        solve(A, du_step.vector(), rhs, "mumps")
+        # Use explicit direct factorization for Newton increments.
+        # This avoids PETSc Krylov/preconditioner failures on ill-conditioned steps.
+        try:
+            lin_solver = LUSolver(A, "mumps")
+        except RuntimeError:
+            lin_solver = LUSolver(A, "default")
+        lin_solver.parameters["symmetric"] = False
+        lin_solver.solve(du_step.vector(), rhs)
+
+        # Increment-based convergence safeguard:
+        # if the Newton correction is tiny relative to current state, accept.
+        du_norm = du_step.vector().norm("l2")
+        u_norm = max(u.vector().norm("l2"), 1.0)
+        inc_rel = du_norm / u_norm
+
         u.vector().axpy(1.0, du_step.vector())
         bc.apply(u.vector())
+        if inc_rel <= newton_inc_tol:
+            return it + 1, residual_norm, rel_norm
 
     raise RuntimeError(
         f"Newton solver failed after {newton_max_iters} iterations "

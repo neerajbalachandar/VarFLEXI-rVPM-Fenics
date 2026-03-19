@@ -111,7 +111,7 @@ lambda_vpm      = 2.0
 sigma_vpm_overwrite = lambda_vpm * magVinf * dt / p_per_step
 sigma_vlm_solver = -1
 sigma_vlm_surf   = 0.05*b
-shed_starting    = false
+shed_starting    = true
 unsteady_shedcrit = 0.01
 vlm_rlx          = 0.35
 
