@@ -43,7 +43,7 @@ eta_chord_comm = eta_chord_edges[:-1] + 0.75 * (eta_chord_edges[1:] - eta_chord_
 # Conservative coupling controls
 work_conservative_mode = True # Can we use both at once, relaxation and conservation?
 rbf_epsilon = 1.0 # shape parameter of local Gaussian RBF for conservative mapping - was 0.06
-aoa_deg = 8.0 # deg
+
 
 # Work-conservation convergence test
 work_rel_tol = 1.0e-3
