@@ -125,7 +125,10 @@ print(
     f"h={plate_thickness:.4e} m, E={E:.3e} Pa, rho_s={rho_s} kg/m^3"
 )
 
-dq = TrialFunction(V)
+# CHANGED:
+# Keep a dedicated TrialFunction for Jacobian linearization of the nonlinear
+# mixed plate residual.
+dq_trial = TrialFunction(V)
 q_test = TestFunction(V)
 q = Function(V, name="PlateState")
 q_old = Function(V)
@@ -168,7 +171,16 @@ def bending_moment(theta):
 
 
 def split_state(x):
-    return split(x)
+    # `ufl.split(x)` works for mixed Arguments/Coefficients, but fails for
+    # algebraic expressions like `avg(...)` that produce a UFL `Sum`.
+    # Fall back to explicit component indexing for those cases.
+    try:
+        return split(x)
+    except Exception:
+        u_mem = as_vector((x[0], x[1]))
+        w = x[2]
+        theta = as_vector((x[3], x[4]))
+        return u_mem, w, theta
 
 
 def displacement_3d(x):
@@ -199,31 +211,21 @@ def k_state(x, y):
     u_x, w_x, theta_x = split_state(x)
     u_y, w_y, theta_y = split_state(y)
 
-    eps_x = membrane_strain(u_x)
     eps_y = membrane_strain(u_y)
-    kap_x = curvature(theta_x)
     kap_y = curvature(theta_y)
     gam_x = rm_gamma(theta_x, w_x)
     gam_y = rm_gamma(theta_y, w_y)
 
-    # Uses fenics_shells.common.constitutive_models.psi_N / psi_M and
-    # reissner_mindlin.forms.psi_T to assemble the plate energy in a way that
-    # matches the local package conventions.
-    membrane_term = (
-        psi_N(eps_x + eps_y, E=Constant(E), nu=Constant(nu), t=h)
-        - psi_N(eps_x, E=Constant(E), nu=Constant(nu), t=h)
-        - psi_N(eps_y, E=Constant(E), nu=Constant(nu), t=h)
-    ) * dx
-    bending_term = (
-        psi_M(kap_x + kap_y, E=Constant(E), nu=Constant(nu), t=h)
-        - psi_M(kap_x, E=Constant(E), nu=Constant(nu), t=h)
-        - psi_M(kap_y, E=Constant(E), nu=Constant(nu), t=h)
-    ) * dx
-    shear_term = (
-        psi_T(gam_x + gam_y, E=Constant(E), nu=Constant(nu), t=h, kappa=kappa_shear)
-        - psi_T(gam_x, E=Constant(E), nu=Constant(nu), t=h, kappa=kappa_shear)
-        - psi_T(gam_y, E=Constant(E), nu=Constant(nu), t=h, kappa=kappa_shear)
-    ) * dx
+    # Use explicit stress-resultant virtual work instead of polarization of
+    # energy terms. This avoids mixed-form arity issues during Jacobian build.
+    N_x = membrane_stress(u_x)
+    M_x = bending_moment(theta_x)
+    G_shear = Constant(E / (2.0 * (1.0 + nu)))
+    K_shear = kappa_shear * G_shear * h
+
+    membrane_term = inner(N_x, eps_y) * dx
+    bending_term = inner(M_x, kap_y) * dx
+    shear_term = K_shear * inner(gam_x, gam_y) * dx
     return membrane_term + bending_term + shear_term
 
 
@@ -276,18 +278,80 @@ def avg(x_old, x_new, alpha):
     return alpha * x_old + (1.0 - alpha) * x_new
 
 
-a_new = update_a(dq, q_old, v_old, a_old, ufl=True)
+# CHANGED:
+# Nonlinear residual must be written in terms of the unknown state `q`
+# (not TrialFunction), otherwise `lhs/rhs` extraction fails on nonlinear terms.
+a_new = update_a(q, q_old, v_old, a_old, ufl=True)
 v_new = update_v(a_new, q_old, v_old, a_old, ufl=True)
 
 res = (
     m_state(avg(a_old, a_new, alpha_m), q_test)
     + c_state(avg(v_old, v_new, alpha_f), q_test)
-    + k_state(avg(q_old, dq, alpha_f), q_test)
+    + k_state(avg(q_old, q, alpha_f), q_test)
     - Wext(q_test)
 )
 
-a_form = lhs(res)
-L_form = rhs(res)
+# CHANGED:
+# Build Jacobian explicitly from nonlinear residual.
+jac_form = derivative(res, q, dq_trial)
+
+# CHANGED:
+# Newton settings for nonlinear mixed plate solve.
+newton_abs_tol = 1.0e-6
+newton_rel_tol = 1.0e-6
+newton_inc_tol = 1.0e-8
+newton_max_iters = 35
+
+
+def solve_nonlinear_step(q_fun, jac_form, res_form, bcs, ext_force_vec=None):
+    for bc in bcs:
+        bc.apply(q_fun.vector())
+
+    residual_norm0 = None
+    dq_step = Function(V)
+
+    for it in range(newton_max_iters):
+        A = assemble(jac_form)
+        residual_vec = assemble(res_form)
+        if ext_force_vec is not None:
+            residual_vec.axpy(-1.0, ext_force_vec)
+
+        for bc in bcs:
+            bc.apply(A, residual_vec, q_fun.vector())
+        A.ident_zeros()
+
+        residual_norm = residual_vec.norm("l2")
+        if residual_norm0 is None:
+            residual_norm0 = max(residual_norm, 1.0)
+        rel_norm = residual_norm / residual_norm0
+
+        if residual_norm <= newton_abs_tol or rel_norm <= newton_rel_tol:
+            return it, residual_norm, rel_norm
+
+        rhs = residual_vec.copy()
+        rhs *= -1.0
+        try:
+            lin_solver = LUSolver(A, "mumps")
+        except RuntimeError:
+            lin_solver = LUSolver(A, "default")
+        lin_solver.parameters["symmetric"] = False
+        lin_solver.solve(dq_step.vector(), rhs)
+
+        dq_norm = dq_step.vector().norm("l2")
+        q_norm = max(q_fun.vector().norm("l2"), 1.0)
+        inc_rel = dq_norm / q_norm
+
+        q_fun.vector().axpy(1.0, dq_step.vector())
+        for bc in bcs:
+            bc.apply(q_fun.vector())
+
+        if inc_rel <= newton_inc_tol:
+            return it + 1, residual_norm, rel_norm
+
+    raise RuntimeError(
+        f"Newton solve failed after {newton_max_iters} iterations "
+        f"(abs={residual_norm:.3e}, rel={rel_norm:.3e})"
+    )
 
 ## Coupling utilities retained from the old file
 ## CHANGED:
@@ -798,24 +862,26 @@ for i in range(Nsteps):
         update_aero_traction(t_aero, forces_eff, n_span, n_chord, eta_chord_comm)
 
     # CHANGED:
-    # The time step solve is now a linear plate solve for the mixed plate state,
-    # not the old nonlinear Newton solve for a 3D hyperelastic solid.
-    A = assemble(a_form)
-    b = assemble(L_form)
+    # Solve mixed plate step with Newton on the nonlinear residual.
+    ext_force_vec = None
     if work_conservative_mode and nodal_forces is not None:
         ext_force_vec = ext_force_vec_template.copy()
         ext_force_vec.zero()
         add_nodal_forces_to_rhs(
             ext_force_vec, nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, dofs_w
         )
-        b.axpy(1.0, ext_force_vec)
+    try:
+        n_it, abs_res, rel_res = solve_nonlinear_step(
+            q, jac_form, res, bcs, ext_force_vec=ext_force_vec
+        )
+    except RuntimeError as err:
+        raise RuntimeError(f"Nonlinear plate solve failed at step {i + 1}/{Nsteps}: {err}")
 
-    for bc in bcs:
-        bc.apply(A, b)
-
-    solve(A, q.vector(), b, "mumps")
-    for bc in bcs:
-        bc.apply(q.vector())
+    if i == 0 or (i + 1) % 20 == 0:
+        print(
+            f"Solid step {i + 1}/{Nsteps}: Newton converged in {n_it} iterations "
+            f"(abs={abs_res:.3e}, rel={rel_res:.3e})"
+        )
 
     update_fields(q, q_old, v_old, a_old)
     t = time[i + 1]

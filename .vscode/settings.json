@@ -14,5 +14,6 @@
         "/home/softroboticslabiith/ros2_ws/install/mypypkg/lib/python3.12/site-packages",
         "/home/softroboticslabiith/ros2_ws/install/my_robot_interfaces/lib/python3.12/site-packages",
         "/opt/ros/jazzy/lib/python3.12/site-packages"
-    ]
+    ],
+    "python-envs.pythonProjects": []
 }

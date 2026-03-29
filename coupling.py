@@ -71,7 +71,7 @@ while fluid_conn is None or solid_conn is None:
     )
 print("Both participants connected.")
 
-nsteps = 200
+nsteps = 400
 
 for step in range(1, nsteps+1):
 

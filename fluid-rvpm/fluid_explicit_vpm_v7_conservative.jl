@@ -239,7 +239,7 @@ simulation = uns.Simulation(vehicle, maneuver, Vref, RPMref, ttot;
 
 # Output configuration
 save_path = normpath(joinpath(@__DIR__, "..", "results", "fluid"))
-run_name = "fluid_explicit_vpm_v7_conservative"
+run_name = "fluid_v7_conservative"
 mkpath(save_path)
 
 # Shedding of vortex particles and dissipation is periodic. why?
@@ -336,7 +336,7 @@ function update_geometry_absolute(wing, wing_ref, u_cp, u_vortex, u_le, u_te)
 
     # Rebuild horseshoes next call without clearing wing.sol["Gamma"].
     # Is this the reason for the periodic gaps between horseshoes - between different displacement acceptance from solid
-    # wing._HSs = nothing
+    wing._HSs = nothing
 end
 
 function read_json_line(sock::TCPSocket, tag::String)
@@ -684,8 +684,8 @@ uns.run_simulation(simulation, nsteps;
     run_name=run_name,
     create_savepath=false,
     prompt=false,
-    nsteps_save=5,
-    save_horseshoes=false
+    nsteps_save=1,
+    save_horseshoes=true
 )
 
 close(sock)
