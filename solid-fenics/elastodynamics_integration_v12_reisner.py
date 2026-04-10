@@ -1,8 +1,7 @@
-# CHANGED FROM v11/v12-solid:
-# This file now models the wing as a 2D plate midsurface instead of a 3D solid.
-# The formulation uses Reissner-Mindlin primary variables (membrane
-# displacement, transverse displacement, rotations), which approaches the
-# Kirchhoff-Love thin-plate relation grad(w) ~= theta as thickness becomes small.
+#note:
+# this file now models the wing as a 2D plate midsurface instead of a 3D solid.
+# uses reissner-mindlin primary variables (membrane
+# displacement, transverse displacement, rotations),KL Plate theory is not used because it would require C1 elements and/or projection
 from dolfin import *
 import numpy as np
 import matplotlib.pyplot as plt
@@ -64,7 +63,7 @@ def x_leading_edge_at(y_val):
 plate_thickness = root_chord * thickness_ratio
 h = Constant(plate_thickness)
 
-# CHANGED:
+
 # We still start from a unit rectangle, but now only map the in-plane chordwise
 # coordinate to the physical tapered/swept wing planform. There is no 3D airfoil
 # thickness projection here because the structure is a plate midsurface.
@@ -84,7 +83,6 @@ def right(x, on_boundary):
     return near(x[1], span) and on_boundary
 
 
-# CHANGED:
 # The unknowns are now:
 # u_mem  -> in-plane membrane displacement (ux, uy)
 # w      -> transverse displacement
@@ -99,7 +97,6 @@ V = FunctionSpace(mesh, state_element)
 Vt = VectorFunctionSpace(mesh, "CG", 1, dim=3)
 Vsig = TensorFunctionSpace(mesh, "DG", 0)
 
-# CHANGED:
 # Aerodynamic loading is still represented as a 3-component vector field so the
 # socket coupling format remains compatible with the fluid side.
 t_aero = Function(Vt, name="AerodynamicLoad")
@@ -142,7 +139,6 @@ I2 = Identity(2)
 
 
 ## Plate kinematics and constitutive terms
-## CHANGED:
 ## These replace the old 3D solid strain/stress definitions.
 
 def membrane_strain(u_mem):
@@ -741,7 +737,6 @@ np.savetxt(
 )
 print(f"Interface nodes ready: aero={len(aero_node_ids)}, coupling={len(cp_node_ids)}")
 
-# CHANGED:
 # Conservative transfer is still used, but now between fluid control points and
 # plate midsurface nodes rather than solid boundary nodes.
 interface_node_ids = aero_node_ids
