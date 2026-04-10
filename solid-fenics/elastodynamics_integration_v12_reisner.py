@@ -26,16 +26,13 @@ T = 4.0
 Nsteps = 400
 dt_value = T / Nsteps
 dt = Constant(dt_value)
-
+#match the values with the ones in the fluid file for consistency, but these won't affect the static solve
 span = 1.0
 root_chord = 0.12
 tip_chord = 0.12
 thickness_ratio = 0.12
 leading_edge_sweep = 0.0
 
-# CHANGED:
-# The structural mesh is now a 2D midsurface mesh for the wing planform.
-# In the previous solid model this was a 3D BoxMesh through the thickness.
 nx, ny = 24, 120
 mesh = RectangleMesh(Point(0.0, 0.0), Point(1.0, span), nx, ny)
 
@@ -448,7 +445,6 @@ def resample_forces_to_shape(
 
 
 def get_scalar_space_coords(space):
-    # CHANGED:
     # Promote 2D FE coordinates to pseudo-3D [x, y, 0] coordinates so existing
     # coupling code can keep working with 3-component point arrays.
     scalar_space = space.sub(0).collapse()
@@ -459,7 +455,6 @@ def get_scalar_space_coords(space):
 
 
 def get_panel_node_ids(n_span, n_chord, eta_chord):
-    # CHANGED:
     # Panel ownership is now computed on the plate midsurface instead of the
     # upper/lower airfoil skin nodes used in the 3D solid model.
     eta_chord = as_eta_array(eta_chord, n_chord)
@@ -505,7 +500,6 @@ def get_panel_node_ids(n_span, n_chord, eta_chord):
 
 
 def update_aero_traction(t_aero, forces, n_span, n_chord, eta_chord):
-    # CHANGED:
     # Panel forces are converted directly into midsurface distributed loads.
     # There is no split across top and bottom wing skins because the structure
     # is no longer represented with two physical outer surfaces.
@@ -595,7 +589,6 @@ def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_o
 
 
 def get_aero_surface_node_ids():
-    # CHANGED:
     # For the plate model, the aerodynamic interface is identified with the full
     # midsurface node set.
     coords_xyz = get_scalar_space_coords(Vt)
@@ -710,7 +703,6 @@ def local_project(v, Vout, u=None):
 
 
 def build_output_displacement(q_fun, out_fun):
-    # CHANGED:
     # Export a 3D displacement field assembled from plate variables so ParaView
     # and the fluid coupling still see a familiar vector displacement output.
     out_fun.assign(project(displacement_3d(q_fun), Vt))
