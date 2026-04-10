@@ -101,6 +101,7 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0)
 # socket coupling format remains compatible with the fluid side.
 t_aero = Function(Vt, name="AerodynamicLoad")
 
+# wing elastic properties
 E = 6.8e10
 nu = 0.35
 rho_s = 1600.0
@@ -109,6 +110,7 @@ kappa_shear = Constant(5.0 / 6.0)
 eta_m = Constant(0.8)
 eta_k = Constant(1.0e-4)
 
+# generalized-alpha method parameters for time integration of the nonlinear plate dynamics.
 alpha_m = Constant(0.10)
 alpha_f = Constant(0.20)
 gamma = Constant(0.5 + alpha_f - alpha_m)
@@ -119,7 +121,7 @@ print(
     f"h={plate_thickness:.4e} m, E={E:.3e} Pa, rho_s={rho_s} kg/m^3"
 )
 
-# CHANGED:
+
 # Keep a dedicated TrialFunction for Jacobian linearization of the nonlinear
 # mixed plate residual.
 dq_trial = TrialFunction(V)
@@ -132,6 +134,7 @@ a_old = Function(V)
 u_zero = Constant((0.0, 0.0))
 bc_u = DirichletBC(V.sub(0), u_zero, left)
 bc_w = DirichletBC(V.sub(1), Constant(0.0), left)
+#clamp the root edge (y=0)
 bc_theta = DirichletBC(V.sub(2), u_zero, left)
 bcs = [bc_u, bc_w, bc_theta]
 
@@ -140,14 +143,11 @@ I2 = Identity(2)
 
 ## Plate kinematics and constitutive terms
 ## These replace the old 3D solid strain/stress definitions.
-
 def membrane_strain(u_mem):
-    # Uses fenics_shells.common.kinematics.e
     return shell_e(u_mem)
 
 
 def curvature(theta):
-    # Uses fenics_shells.common.kinematics.k
     return shell_k(theta)
 
 
@@ -876,7 +876,6 @@ for i in range(Nsteps):
     build_output_displacement(q, u_vis)
     xdmf_file.write(u_vis, t)
 
-    # CHANGED:
     # Stress output is now membrane stress on the plate midsurface rather than a
     # full 3D Cauchy stress tensor through the solid wing volume.
     q_mem, _q_w, _q_theta = q.split(deepcopy=True)
@@ -915,7 +914,7 @@ sock.close()
 print("Solid solver finished.")
 print(f"Solid field outputs: {xdmf_path}")
 
-# CHANGED:
+
 # This diagnostic measures how close the Reissner-Mindlin solution is to the
 # Kirchhoff-Love thin-plate constraint theta = grad(w).
 _u_final, w_final, theta_final = q.split(deepcopy=True)
