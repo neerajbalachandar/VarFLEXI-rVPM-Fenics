@@ -486,6 +486,46 @@ def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_o
     forces = np.clip(forces, -max_abs_force_component, max_abs_force_component)
     return forces, False
 
+
+def estimate_panel_rotations_from_displacement(u_cp_arr, n_span, n_chord, eta_span, eta_chord):
+    # Small-angle rotation estimate from out-of-plane displacement gradients:
+    # omega_x ~= dw/dy, omega_y ~= -dw/dx, omega_z ~= 0
+    u_grid = np.asarray(u_cp_arr, dtype=float).reshape((n_span, n_chord, 3))
+    w_grid = u_grid[:, :, 2]
+    eta_span = as_eta_array(eta_span, n_span)
+    eta_chord = as_eta_array(eta_chord, n_chord)
+
+    rot = np.zeros((n_span, n_chord, 3), dtype=float)
+    for i in range(n_span):
+        y = eta_span[i] * span
+        c_loc = max(chord_at(y), 1.0e-8)
+        for j in range(n_chord):
+            if n_chord == 1:
+                dwdeta_c = 0.0
+            elif j == 0:
+                dwdeta_c = (w_grid[i, 1] - w_grid[i, 0]) / max(eta_chord[1] - eta_chord[0], 1.0e-12)
+            elif j == n_chord - 1:
+                dwdeta_c = (w_grid[i, -1] - w_grid[i, -2]) / max(eta_chord[-1] - eta_chord[-2], 1.0e-12)
+            else:
+                dwdeta_c = (w_grid[i, j + 1] - w_grid[i, j - 1]) / max(eta_chord[j + 1] - eta_chord[j - 1], 1.0e-12)
+            dwdx = dwdeta_c / c_loc
+
+            if n_span == 1:
+                dwdeta_s = 0.0
+            elif i == 0:
+                dwdeta_s = (w_grid[1, j] - w_grid[0, j]) / max(eta_span[1] - eta_span[0], 1.0e-12)
+            elif i == n_span - 1:
+                dwdeta_s = (w_grid[-1, j] - w_grid[-2, j]) / max(eta_span[-1] - eta_span[-2], 1.0e-12)
+            else:
+                dwdeta_s = (w_grid[i + 1, j] - w_grid[i - 1, j]) / max(eta_span[i + 1] - eta_span[i - 1], 1.0e-12)
+            dwdy = dwdeta_s / max(span, 1.0e-12)
+
+            rot[i, j, 0] = dwdy
+            rot[i, j, 1] = -dwdx
+            rot[i, j, 2] = 0.0
+
+    return rot.reshape((n_span * n_chord, 3))
+
 def get_aero_surface_node_ids():
     '''We are using the logic of "inside" fn defn from AeroSurface class, where the cells which have global coordinates
     taken from tabulate.dof, are checked if they are inside the boundary and then appended to the sorted 
@@ -628,6 +668,7 @@ xdmf_file = XDMFFile(xdmf_path)
 xdmf_file.parameters["flush_output"] = True
 xdmf_file.parameters["functions_share_mesh"] = True
 xdmf_file.parameters["rewrite_function_mesh"] = False
+File(os.path.join(out_dir, "solid_mesh.pvd")) << mesh
 
 print("Connecting solid to coupling server...")
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -687,11 +728,15 @@ u_cp0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
 sock.sendall((json.dumps({
     "step": 0,
     "aoa_deg": aoa_deg,
+    "dt": dt_value,
+    "ttot": T,
+    "nsteps": Nsteps,
     "n_span": n_span,
     "n_chord": n_chord,
     "eta_span": eta_span_comm.tolist(),
     "eta_chord": eta_chord_comm.tolist(),
-    "geometry": u_cp0
+    "geometry": u_cp0,
+    "rotation": u_cp0
 }) + "\n").encode())
 print("Initial geometry sent.")
 
@@ -704,6 +749,9 @@ forces_prev = None
 work_rel_errors = np.full((Nsteps,), np.nan, dtype=float)
 work_Wf = np.full((Nsteps,), np.nan, dtype=float)
 work_Ws = np.full((Nsteps,), np.nan, dtype=float)
+rhs_norm_hist = np.full((Nsteps,), np.nan, dtype=float)
+disp_res_hist = np.full((Nsteps,), np.nan, dtype=float)
+iter_hist = np.ones((Nsteps,), dtype=int)
 
 for i in range(Nsteps):
     print(f"Solid step {i+1}/{Nsteps}: waiting for force...")
@@ -763,7 +811,9 @@ for i in range(Nsteps):
     rhs_vec = assemble(L_form)
     if work_conservative_mode and nodal_forces is not None:
         add_nodal_forces_to_rhs(rhs_vec, nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, dofs_u_z)
+    rhs_norm_hist[i] = rhs_vec.norm("l2")
     bc.apply(rhs_vec)
+    u_prev_vec = u_old.vector().get_local()
     try:
         solver.solve(K, u.vector(), rhs_vec)
     except RuntimeError as err:
@@ -771,6 +821,8 @@ for i in range(Nsteps):
         print("Retrying with freshly assembled matrix and direct LU.")
         K_retry, _ = assemble_system(a_form, L_form, bc)
         solve(K_retry, u.vector(), rhs_vec, "lu")
+    u_new_vec = u.vector().get_local()
+    disp_res_hist[i] = np.linalg.norm(u_new_vec - u_prev_vec) / max(np.linalg.norm(u_new_vec), 1.0e-16)
 
     update_fields(u, u_old, v_old, a_old)
 
@@ -812,11 +864,17 @@ for i in range(Nsteps):
         msg_geo = json.dumps({
             "step": i + 1,
             "aoa_deg": aoa_deg,
+            "dt": dt_value,
+            "ttot": T,
+            "nsteps": Nsteps,
             "n_span": n_span,
             "n_chord": n_chord,
             "eta_span": eta_span_comm.tolist(),
             "eta_chord": eta_chord_comm.tolist(),
-            "geometry": u_cp
+            "geometry": u_cp,
+            "rotation": estimate_panel_rotations_from_displacement(
+                np.asarray(u_cp, dtype=float), n_span, n_chord, eta_span_comm, eta_chord_comm
+            ).tolist()
         })
         sock.sendall((msg_geo + "\n").encode())
         print(f"Solid step {i+1}/{Nsteps}: geometry sent.")
@@ -825,6 +883,18 @@ sock_file.close()
 sock.close()
 print("Solid solver finished.")
 print(f"Solid field outputs: {xdmf_path}")
+
+diag_csv = os.path.join(out_dir, "solid_v9_diagnostics.csv")
+with open(diag_csv, "w") as fp:
+    fp.write("step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error,rhs_norm,disp_residual,newton_iters\n")
+    for k in range(Nsteps):
+        fp.write(
+            f"{k+1},{time[k+1]:.12e},{u_tip[k+1]:.12e},"
+            f"{energies[k+1,0]:.12e},{energies[k+1,1]:.12e},{energies[k+1,2]:.12e},{energies[k+1,3]:.12e},"
+            f"{work_Wf[k]:.12e},{work_Ws[k]:.12e},{work_rel_errors[k]:.12e},"
+            f"{rhs_norm_hist[k]:.12e},{disp_res_hist[k]:.12e},{iter_hist[k]}\n"
+        )
+print(f"Saved diagnostics: {diag_csv}")
 
 if work_conservative_mode:
     valid = np.isfinite(work_rel_errors)

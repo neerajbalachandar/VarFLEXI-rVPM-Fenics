@@ -3,9 +3,14 @@ import json
 import os
 import errno
 import subprocess
+import csv
+from typing import Optional, List
 
 HOST = os.getenv("COUPLING_HOST", "127.0.0.1")
 PORT = int(os.getenv("COUPLING_PORT", "9000"))
+NSTEPS = int(os.getenv("COUPLING_NSTEPS", "400"))
+FORCE_RELAX = float(os.getenv("COUPLING_FORCE_RELAX", "1.0"))
+USE_AITKEN = os.getenv("COUPLING_AITKEN", "1").strip() not in ("0", "false", "False")
 
 def port_owner_hint(port):
     try:
@@ -71,9 +76,17 @@ while fluid_conn is None or solid_conn is None:
     )
 print("Both participants connected.")
 
-nsteps = 400
+results_dir = os.path.join("results", "coupling")
+os.makedirs(results_dir, exist_ok=True)
+log_csv = os.path.join(results_dir, "coupling_history.csv")
+log_fp = open(log_csv, "w", newline="")
+writer = csv.writer(log_fp)
+writer.writerow(["step", "n_forces", "force_relax_used", "force_residual", "sample_fx", "sample_fy", "sample_fz"])
 
-for step in range(1, nsteps+1):
+prev_forces: Optional[List[List[float]]] = None
+aitken_relax = FORCE_RELAX
+
+for step in range(1, NSTEPS + 1):
 
     print(f"\n--- Step {step} ---")
 
@@ -96,15 +109,65 @@ for step in range(1, nsteps+1):
     forces = force_data.get("force", [])
     if not isinstance(forces, list):
         raise RuntimeError(f"Fluid sent invalid force payload at step {step}")
+    if len(forces) == 0:
+        raise RuntimeError(f"Fluid sent empty force payload at step {step}")
 
-    # 🔎 DEBUG PRINT
-    print("Sample force[0] =", forces[0])
+    # Optional explicit coupling relaxation for stability.
+    # This does not turn the scheme into strongly coupled GS sub-iterations,
+    # but helps damp loose-coupling oscillations.
+    force_residual = 0.0
+    relax_used = FORCE_RELAX
+    if prev_forces is not None and len(prev_forces) == len(forces):
+        num = 0.0
+        den = 0.0
+        for a, b in zip(forces, prev_forces):
+            dx = float(a[0]) - float(b[0])
+            dy = float(a[1]) - float(b[1])
+            dz = float(a[2]) - float(b[2])
+            num += dx * dx + dy * dy + dz * dz
+            den += float(a[0]) ** 2 + float(a[1]) ** 2 + float(a[2]) ** 2
+        force_residual = (num ** 0.5) / max(den ** 0.5, 1.0e-16)
+
+        if USE_AITKEN:
+            # Simple bounded Aitken-like update based on residual trend.
+            if force_residual > 1.0e-2:
+                aitken_relax = max(0.25, 0.9 * aitken_relax)
+            else:
+                aitken_relax = min(1.0, 1.05 * aitken_relax)
+            relax_used = max(0.2, min(1.0, aitken_relax))
+
+        if relax_used < 0.999:
+            relaxed = []
+            for f_new, f_old in zip(forces, prev_forces):
+                relaxed.append([
+                    relax_used * float(f_new[0]) + (1.0 - relax_used) * float(f_old[0]),
+                    relax_used * float(f_new[1]) + (1.0 - relax_used) * float(f_old[1]),
+                    relax_used * float(f_new[2]) + (1.0 - relax_used) * float(f_old[2]),
+                ])
+            force_data["force"] = relaxed
+            forces = relaxed
+    prev_forces = [list(map(float, f[:3])) for f in forces]
+
+    # DEBUG PRINT
+    print(f"Sample force[0] = {forces[0]} (relax={relax_used:.3f}, residual={force_residual:.3e})")
+
+    writer.writerow([
+        step,
+        len(forces),
+        f"{relax_used:.6f}",
+        f"{force_residual:.6e}",
+        f"{float(forces[0][0]):.6e}",
+        f"{float(forces[0][1]):.6e}",
+        f"{float(forces[0][2]):.6e}",
+    ])
 
     # 4) Send forces to solid
     print("Sending forces to solid...")
     solid_conn.sendall((json.dumps(force_data) + "\n").encode())
 
 print("Coupling finished.")
+print(f"Coupling diagnostics saved at: {log_csv}")
+log_fp.close()
 
 fluid_conn.close()
 solid_conn.close()

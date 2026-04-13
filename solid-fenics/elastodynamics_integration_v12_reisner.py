@@ -674,6 +674,15 @@ def get_nodal_displacements(q_fun, node_ids, dofs_x, dofs_y, dofs_w):
     return out
 
 
+def get_nodal_rotations(q_fun, node_ids, dofs_tx, dofs_ty):
+    q_arr = q_fun.vector().get_local()
+    out = np.zeros((len(node_ids), 3), dtype=float)
+    out[:, 0] = q_arr[dofs_tx[node_ids]]
+    out[:, 1] = q_arr[dofs_ty[node_ids]]
+    out[:, 2] = 0.0
+    return out
+
+
 def add_nodal_forces_to_rhs(rhs_vec, nodal_forces, node_ids, dofs_x, dofs_y, dofs_w):
     arr = rhs_vec.get_local()
     arr[dofs_x[node_ids]] += nodal_forces[:, 0]
@@ -714,6 +723,7 @@ xdmf_file = XDMFFile(xdmf_path)
 xdmf_file.parameters["flush_output"] = True
 xdmf_file.parameters["functions_share_mesh"] = True
 xdmf_file.parameters["rewrite_function_mesh"] = False
+File(os.path.join(out_dir, "solid_mesh.pvd")) << mesh
 
 print("Connecting solid to coupling server...")
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -758,6 +768,8 @@ print(
 dofs_u_x = np.asarray(V.sub(0).sub(0).dofmap().dofs(), dtype=np.int64)
 dofs_u_y = np.asarray(V.sub(0).sub(1).dofmap().dofs(), dtype=np.int64)
 dofs_w = np.asarray(V.sub(1).dofmap().dofs(), dtype=np.int64)
+dofs_theta_x = np.asarray(V.sub(2).sub(0).dofmap().dofs(), dtype=np.int64)
+dofs_theta_y = np.asarray(V.sub(2).sub(1).dofmap().dofs(), dtype=np.int64)
 
 if work_conservative_mode:
     t_aero.vector().zero()
@@ -769,11 +781,15 @@ sock.sendall(
         json.dumps(
             {
                 "step": 0,
+                "dt": dt_value,
+                "ttot": T,
+                "nsteps": Nsteps,
                 "n_span": n_span,
                 "n_chord": n_chord,
                 "eta_span": eta_span_comm.tolist(),
                 "eta_chord": eta_chord_comm.tolist(),
                 "geometry": u_cp0,
+                "rotation": u_cp0,
             }
         )
         + "\n"
@@ -790,6 +806,9 @@ forces_prev = None
 work_rel_errors = np.full((Nsteps,), np.nan, dtype=float)
 work_Wf = np.full((Nsteps,), np.nan, dtype=float)
 work_Ws = np.full((Nsteps,), np.nan, dtype=float)
+newton_iter_hist = np.full((Nsteps,), np.nan, dtype=float)
+newton_abs_hist = np.full((Nsteps,), np.nan, dtype=float)
+newton_rel_hist = np.full((Nsteps,), np.nan, dtype=float)
 ext_force_vec_template = q.vector().copy()
 ext_force_vec_template.zero()
 
@@ -863,6 +882,9 @@ for i in range(Nsteps):
         )
     except RuntimeError as err:
         raise RuntimeError(f"Nonlinear plate solve failed at step {i + 1}/{Nsteps}: {err}")
+    newton_iter_hist[i] = float(n_it)
+    newton_abs_hist[i] = float(abs_res)
+    newton_rel_hist[i] = float(rel_res)
 
     if i == 0 or (i + 1) % 20 == 0:
         print(
@@ -896,14 +918,20 @@ for i in range(Nsteps):
     if i < Nsteps - 1:
         u_nodes = get_nodal_displacements(q, interface_node_ids, dofs_u_x, dofs_u_y, dofs_w)
         u_cp_arr = map_displacements_to_fluid(u_nodes, nbr_ids, nbr_w)
+        rot_nodes = get_nodal_rotations(q, interface_node_ids, dofs_theta_x, dofs_theta_y)
+        rot_cp_arr = map_displacements_to_fluid(rot_nodes, nbr_ids, nbr_w)
         msg_geo = json.dumps(
             {
                 "step": i + 1,
+                "dt": dt_value,
+                "ttot": T,
+                "nsteps": Nsteps,
                 "n_span": n_span,
                 "n_chord": n_chord,
                 "eta_span": eta_span_comm.tolist(),
                 "eta_chord": eta_chord_comm.tolist(),
                 "geometry": u_cp_arr.tolist(),
+                "rotation": rot_cp_arr.tolist(),
             }
         )
         sock.sendall((msg_geo + "\n").encode())
@@ -913,6 +941,18 @@ sock_file.close()
 sock.close()
 print("Solid solver finished.")
 print(f"Solid field outputs: {xdmf_path}")
+
+diag_csv = os.path.join(out_dir, "solid_v12_diagnostics.csv")
+with open(diag_csv, "w") as fp:
+    fp.write("step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error,newton_iters,newton_abs,newton_rel\n")
+    for k in range(Nsteps):
+        fp.write(
+            f"{k+1},{time[k+1]:.12e},{u_tip[k+1]:.12e},"
+            f"{energies[k+1,0]:.12e},{energies[k+1,1]:.12e},{energies[k+1,2]:.12e},{energies[k+1,3]:.12e},"
+            f"{work_Wf[k]:.12e},{work_Ws[k]:.12e},{work_rel_errors[k]:.12e},"
+            f"{newton_iter_hist[k]:.12e},{newton_abs_hist[k]:.12e},{newton_rel_hist[k]:.12e}\n"
+        )
+print(f"Saved diagnostics: {diag_csv}")
 
 
 # This diagnostic measures how close the Reissner-Mindlin solution is to the
