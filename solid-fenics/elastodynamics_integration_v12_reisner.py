@@ -266,7 +266,7 @@ def update_fields(u, u_old, v_old, a_old):
     a_old.vector()[:] = a_vec
     u_old.vector()[:] = u_vec
 
-
+#relaxation?
 def avg(x_old, x_new, alpha):
     return alpha * x_old + (1.0 - alpha) * x_new
 
