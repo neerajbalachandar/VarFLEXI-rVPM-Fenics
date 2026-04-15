@@ -21,8 +21,8 @@ from fenics_shells import psi_T
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
-T = 4.0
-Nsteps = 400
+T = float(os.getenv("COUPLING_TTOT", "4.0"))
+Nsteps = int(os.getenv("COUPLING_NSTEPS", "200"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
 #match the values with the ones in the fluid file for consistency, but these won't affect the static solve
@@ -38,7 +38,9 @@ mesh = RectangleMesh(Point(0.0, 0.0), Point(1.0, span), nx, ny)
 n_span = 80
 n_chord = 8
 m_panels_comm = n_span * n_chord
-eta_span_comm = np.linspace(0.0, 1.0, n_span)
+# Use span-panel center stations for communication so eta metadata matches
+# the actual coupling sample locations used in extract_coupling_node_indices.
+eta_span_comm = (np.arange(n_span, dtype=float) + 0.5) / n_span
 eta_chord_edges = np.linspace(0.0, 1.0, n_chord + 1)
 eta_chord_comm = eta_chord_edges[:-1] + 0.75 * (
     eta_chord_edges[1:] - eta_chord_edges[:-1]
@@ -76,7 +78,7 @@ for i in range(coords.shape[0]):
 
 
 def left(x, on_boundary):
-    return near(x[1], 0.0) and on_boundary
+    return near(x[1], 0.0) and on_boundary # BC at span edge - left is front
 
 
 def right(x, on_boundary):
@@ -102,13 +104,13 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0)
 t_aero = Function(Vt, name="AerodynamicLoad")
 
 # wing elastic properties
-E = 6.8e10
+E = 5e9
 nu = 0.35
-rho_s = 1600.0
+rho_s = 1400.0
 rho = Constant(rho_s)
 kappa_shear = Constant(5.0 / 6.0)
-eta_m = Constant(0.8)
-eta_k = Constant(1.0e-4)
+eta_m = Constant(0.05)
+eta_k = Constant(5.0e-5)
 
 # generalized-alpha method parameters for time integration of the nonlinear plate dynamics.
 alpha_m = Constant(0.10)
@@ -120,6 +122,7 @@ print(
     f"Plate setup (solid): span={span} m, c_root={root_chord} m, c_tip={tip_chord} m, "
     f"h={plate_thickness:.4e} m, E={E:.3e} Pa, rho_s={rho_s} kg/m^3"
 )
+print(f"Solid time config: T={T} s, Nsteps={Nsteps}, dt={dt_value}")
 
 
 # Keep a dedicated TrialFunction for Jacobian linearization of the nonlinear
@@ -553,6 +556,25 @@ def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_o
         n_span_in = int(data.get("n_span", 0))
         n_chord_in = int(data.get("n_chord", 0))
         force_raw = np.asarray(data.get("force", []), dtype=float).reshape(-1, 3)
+        indexing = str(data.get("indexing", "span-major"))
+        if n_span_in > 0 and n_chord_in > 0 and len(force_raw) == n_span_in * n_chord_in:
+            # Normalize incoming flattening to span-major:
+            # idx = i_span * n_chord + j_chord
+            force_grid = np.zeros((n_span_in, n_chord_in, 3), dtype=float)
+            k = 0
+            if indexing == "span-major":
+                for i in range(n_span_in):
+                    for j in range(n_chord_in):
+                        force_grid[i, j, :] = force_raw[k, :]
+                        k += 1
+            elif indexing == "chord-major":
+                for j in range(n_chord_in):
+                    for i in range(n_span_in):
+                        force_grid[i, j, :] = force_raw[k, :]
+                        k += 1
+            else:
+                raise RuntimeError(f"Unsupported force indexing '{indexing}'")
+            force_raw = force_grid.reshape((-1, 3))
         eta_span_in = (
             as_eta_array(data.get("eta_span"), n_span_in) if n_span_in > 0 else None
         )
@@ -597,7 +619,7 @@ def extract_coupling_node_indices(n_span, n_chord, eta_chord, coords_xyz):
     tree = cKDTree(coords_xyz[:, :2])
     targets = []
     for i_span in range(n_span):
-        y_target = (i_span + 0.5) * span / n_span
+        y_target = eta_span_comm[i_span] * span
         chord = chord_at(y_target)
         x_le = x_leading_edge_at(y_target)
         for j_chord in range(n_chord):
@@ -716,7 +738,7 @@ def build_output_displacement(q_fun, out_fun):
 sig = Function(Vsig, name="MembraneStress")
 u_vis = Function(Vt, name="Displacement")
 
-out_dir = "../results"
+out_dir = "../results/v12_v8_chordBC/"
 os.makedirs(out_dir, exist_ok=True)
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
 xdmf_file = XDMFFile(xdmf_path)
@@ -786,6 +808,7 @@ sock.sendall(
                 "nsteps": Nsteps,
                 "n_span": n_span,
                 "n_chord": n_chord,
+                "indexing": "span-major",
                 "eta_span": eta_span_comm.tolist(),
                 "eta_chord": eta_chord_comm.tolist(),
                 "geometry": u_cp0,
@@ -928,6 +951,7 @@ for i in range(Nsteps):
                 "nsteps": Nsteps,
                 "n_span": n_span,
                 "n_chord": n_chord,
+                "indexing": "span-major",
                 "eta_span": eta_span_comm.tolist(),
                 "eta_chord": eta_chord_comm.tolist(),
                 "geometry": u_cp_arr.tolist(),

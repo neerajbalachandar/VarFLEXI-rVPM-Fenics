@@ -8,7 +8,7 @@ from typing import Optional, List
 
 HOST = os.getenv("COUPLING_HOST", "127.0.0.1")
 PORT = int(os.getenv("COUPLING_PORT", "9000"))
-NSTEPS = int(os.getenv("COUPLING_NSTEPS", "400"))
+NSTEPS = int(os.getenv("COUPLING_NSTEPS", "800"))
 FORCE_RELAX = float(os.getenv("COUPLING_FORCE_RELAX", "1.0"))
 USE_AITKEN = os.getenv("COUPLING_AITKEN", "1").strip() not in ("0", "false", "False")
 
@@ -51,6 +51,7 @@ def accept_role(server, fluid_conn, fluid_file, solid_conn, solid_file):
     raise RuntimeError(f"Client {addr} must send role handshake {{\"role\":\"fluid\"|\"solid\"}}")
 
 print("Starting coupling server...")
+print(f"Coupling config: NSTEPS={NSTEPS}, FORCE_RELAX={FORCE_RELAX}, AITKEN={USE_AITKEN}")
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -97,6 +98,24 @@ for step in range(1, NSTEPS + 1):
     geometry = geo_data.get("geometry", [])
     if not isinstance(geometry, list) or len(geometry) == 0:
         raise RuntimeError(f"Solid sent invalid geometry payload at step {step}")
+    n_span = int(geo_data.get("n_span", 0)) if "n_span" in geo_data else 0
+    n_chord = int(geo_data.get("n_chord", 0)) if "n_chord" in geo_data else 0
+    if n_span > 0 and n_chord > 0:
+        expected = n_span * n_chord
+        if len(geometry) != expected:
+            raise RuntimeError(
+                f"Solid geometry length mismatch at step {step}: "
+                f"received {len(geometry)}, expected {expected} ({n_span}x{n_chord})"
+            )
+        rot = geo_data.get("rotation", [])
+        if isinstance(rot, list) and len(rot) not in (0, expected):
+            raise RuntimeError(
+                f"Solid rotation length mismatch at step {step}: "
+                f"received {len(rot)}, expected {expected} ({n_span}x{n_chord})"
+            )
+        idxing = str(geo_data.get("indexing", "span-major"))
+        if idxing not in ("span-major", "chord-major"):
+            raise RuntimeError(f"Unsupported indexing '{idxing}' at step {step}")
 
     # 2) Send geometry to fluid
     print("Sending geometry to fluid...")
@@ -111,6 +130,13 @@ for step in range(1, NSTEPS + 1):
         raise RuntimeError(f"Fluid sent invalid force payload at step {step}")
     if len(forces) == 0:
         raise RuntimeError(f"Fluid sent empty force payload at step {step}")
+    if n_span > 0 and n_chord > 0:
+        expected = n_span * n_chord
+        if len(forces) != expected:
+            raise RuntimeError(
+                f"Fluid force length mismatch at step {step}: "
+                f"received {len(forces)}, expected {expected} ({n_span}x{n_chord})"
+            )
 
     # Optional explicit coupling relaxation for stability.
     # This does not turn the scheme into strongly coupled GS sub-iterations,

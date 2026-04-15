@@ -11,8 +11,8 @@ from scipy.spatial import cKDTree
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
-T = 4.0                     # s
-Nsteps = 400
+T = float(os.getenv("COUPLING_TTOT", "4.0"))                     # s
+Nsteps = int(os.getenv("COUPLING_NSTEPS", "800"))
 dt_value = T/Nsteps
 dt = Constant(dt_value)
 
@@ -166,6 +166,7 @@ print(
     f"SI setup (solid): span={span} m, c_root={root_chord} m, c_tip={tip_chord} m, "
     f"E={E:.3e} Pa, rho_s={rho_s} kg/m^3, AoA={aoa_deg} deg"
 )
+print(f"Solid time config: T={T} s, Nsteps={Nsteps}, dt={dt_value}")
 
 du = TrialFunction(V)
 u_ = TestFunction(V)
@@ -767,7 +768,7 @@ def local_project(v, V, u=None):
 
 sig = Function(Vsig, name="sigma") # Stress output field
 
-out_dir = "../results"
+out_dir = "../results/v11_v8_chordBC/"
 os.makedirs(out_dir, exist_ok=True)
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
 xdmf_file = XDMFFile(xdmf_path)

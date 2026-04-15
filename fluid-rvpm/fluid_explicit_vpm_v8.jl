@@ -1,8 +1,3 @@
-# Coupled fluid solver (v8):
-# - chordwise + spanwise panel coupling
-# - displacement + optional rotation transfer from solid
-# - all chordwise rows allowed to shed for visualization/debug studies
-
 using Sockets
 using JSON
 using LinearAlgebra
@@ -10,15 +5,13 @@ import FLOWUnsteady as uns
 import FLOWVLM as vlm
 import FLOWVPM as vpm
 
-# Avoid FLOWVLM colinearity edge-case crash when Gamma is `nothing` in
-# geometric-factor evaluations.
+# Avoid FLOWVLM colinearity edge-case crash when Gamma is `nothing` in geometric-factor evaluations.
 vlm.VLMSolver._regularize(true)
 
 # Workaround for FLOWVLM colinearity bug:
 # when gamma===nothing, promote_type can become Union{Nothing,Float64}, and
 # zeros(::Type{Union{Nothing,Float64}}, 3) throws.
 
-#Understand what is done here
 function vlm.VLMSolver._V_AB(A::Vector{<:vlm.VLMSolver.FWrap}, B, C, gamma; ign_col::Bool=false)
     r0 = B - A
     r1 = C - A
@@ -81,9 +74,8 @@ end
 
 
 #------------------------------------------------------MAIN----------------------------------------------------
-# SIMULATION PARAMETERS
-AOA             = 8.0
-magVinf         = 50
+AOA             = parse(Float64, get(ENV, "FLUID_AOA_DEG", "8.0"))
+magVinf         = parse(Float64, get(ENV, "FLUID_VINF", "8.0"))
 rho             = 1.0
 
 # Match solid geometry (cantilever wing: y in [0, span])
@@ -102,30 +94,37 @@ gamma           = 0.0
 n_span          = 80
 
 wakelength      = 2.75*b
-ttot            = 4.0   # wakelength/magVinf
-nsteps          = parse(Int, get(ENV, "COUPLING_NSTEPS", "400"))
+ttot            = parse(Float64, get(ENV, "COUPLING_TTOT", "4.0"))
+nsteps          = parse(Int, get(ENV, "COUPLING_NSTEPS", "200"))
 dt              = ttot/nsteps
 
 # VPM parameters
-# FLOWUnsteady expects integer particle release count per step.
-p_per_step      = 8
+p_per_step      = parse(Int, get(ENV, "FLUID_P_PER_STEP", "2"))
 lambda_vpm      = 2.0
 sigma_vpm_overwrite = lambda_vpm * magVinf * dt / p_per_step
 sigma_vlm_solver = -1
 sigma_vlm_surf   = 0.05*b
 shed_starting    = true
-unsteady_shedcrit = -1.0
-use_unsteady_shedding = false
+unsteady_shedcrit = 0.0
+use_unsteady_shedding = true
 vlm_rlx          = 0.35
+
+println(
+    "Fluid run config: AoA=$(AOA) deg, U=$(magVinf) m/s, T=$(ttot) s, " *
+    "nsteps=$(nsteps), dt=$(dt), p_per_step=$(p_per_step)"
+)
 
 # Coupling stabilization (numerical damping)
 geom_relax       = 1.0           # 0<geom_relax<=1; lower is more damping
-force_relax      = 1.0           # 0<force_relax<=1
-max_abs_disp     = 0.01*b         # clamp incoming displacement magnitude
+force_relax      = 1.0           # 0<force_relax<=1/ 4 / pi) * F1 * F2)
+end
+
+function vlm.VLMSolver._V_Ainf_out(A::Vector{<:vlm.
+# max_abs_disp     = b         # clamp incoming displacement magnitude
 
 # Run the simulation once without capping
-max_abs_force    = 1.0e6          # clamp outgoing per-panel force component
-max_abs_gamma    = 1.0e4          # cap pathological circulation spikes
+# max_abs_force    = 1.0e6          # clamp outgoing per-panel force component
+# max_abs_gamma    = 1.0e4          # cap pathological circulation spikes
 
 disp_scale_x     = 1.00           # debug alignment: apply full displacement
 disp_scale_y     = 1.00           # debug alignment: apply full displacement
@@ -144,7 +143,7 @@ eta_chord_le     = [eta_chord_edges[j] for j in 1:n_chord]
 eta_chord_te     = [eta_chord_edges[j+1] for j in 1:n_chord]
 
 # Optional rotational coupling stabilization.
-max_abs_rotation = 1.0
+# max_abs_rotation = 1.0
 
 min_panel_chord = (tip_chord > 0 ? tip_chord : root_chord) / max(n_chord, 1)
 convective_cfl = magVinf * dt / max(min_panel_chord, 1.0e-8)
@@ -263,8 +262,8 @@ simulation = uns.Simulation(vehicle, maneuver, Vref, RPMref, ttot;
                               Vinit=Vinit, Winit=Winit)
 
 # Output configuration
-save_path = normpath(joinpath(@__DIR__, "..", "results", "fluid"))
-run_name = "fluid_v8_allchord"
+save_path = normpath(joinpath(@__DIR__, "..", "results/v12_v8_chordBC/", "fluid"))
+run_name = "fluid_v8"
 mkpath(save_path)
 
 # Shedding of vortex particles and dissipation is periodic. why?
@@ -280,12 +279,12 @@ omit_shedding_rows = Int[]
 rmv_strength = 2 * 2 / p_per_step * dt / (1 / 12)
 minmaxGamma = rmv_strength .* [0.0001, 0.15]
 wake_treatment_strength = uns.remove_particles_strength(
-    minmaxGamma[1]^2, minmaxGamma[2]^2; every_nsteps=1
+    minmaxGamma[1]^2, minmaxGamma[2]^2; every_nsteps=5
 )
 
 minmaxsigma = sigma_vpm_overwrite .* [0.1, 6.0]
 wake_treatment_sigma = uns.remove_particles_sigma(
-    minmaxsigma[1], minmaxsigma[2]; every_nsteps=1
+    minmaxsigma[1], minmaxsigma[2]; every_nsteps=5
 )
 
 wake_treatment_sphere = uns.remove_particles_sphere(
@@ -455,13 +454,50 @@ function decode_vector_payload(msg, key::String,
                        Float64.(msg["eta_span"]) : uniform_eta(n_span_in)
         eta_chord_src = haskey(msg, "eta_chord") && length(msg["eta_chord"]) == n_chord_in ?
                         Float64.(msg["eta_chord"]) : uniform_eta(n_chord_in)
+        indexing = haskey(msg, "indexing") ? String(msg["indexing"]) : "span-major"
 
         p_s = sortperm(eta_span_src)
         p_c = sortperm(eta_chord_src)
         eta_span_src = eta_span_src[p_s]
         eta_chord_src = eta_chord_src[p_c]
 
-        grid = reshape(vals, n_span_in, n_chord_in, 3)
+        # IMPORTANT: Build the 2D payload grid explicitly using the declared
+        # flattening rule to avoid Julia reshape memory-order ambiguity.
+        grid = zeros(Float64, n_span_in, n_chord_in, 3)
+        if indexing == "span-major"
+            # idx = (i_span-1)*n_chord + j_chord
+            idx = 1
+            for i in 1:n_span_in
+                for j in 1:n_chord_in
+                    grid[i, j, 1] = vals[idx, 1]
+                    grid[i, j, 2] = vals[idx, 2]
+                    grid[i, j, 3] = vals[idx, 3]
+                    idx += 1
+                end
+            end
+        elseif indexing == "chord-major"
+            # idx = (j_chord-1)*n_span + i_span
+            idx = 1
+            for j in 1:n_chord_in
+                for i in 1:n_span_in
+                    grid[i, j, 1] = vals[idx, 1]
+                    grid[i, j, 2] = vals[idx, 2]
+                    grid[i, j, 3] = vals[idx, 3]
+                    idx += 1
+                end
+            end
+        else
+            @warn "Unknown indexing='$indexing' in payload key '$key'; defaulting to span-major."
+            idx = 1
+            for i in 1:n_span_in
+                for j in 1:n_chord_in
+                    grid[i, j, 1] = vals[idx, 1]
+                    grid[i, j, 2] = vals[idx, 2]
+                    grid[i, j, 3] = vals[idx, 3]
+                    idx += 1
+                end
+            end
+        end
         grid_sorted = similar(grid)
         for i in 1:n_span_in, j in 1:n_chord_in
             grid_sorted[i, j, :] .= grid[p_s[i], p_c[j], :]
@@ -584,8 +620,8 @@ omega_raw0, _, _ = decode_rotation_payload(msg0, eta_span_fluid, eta_chord_comm)
 u_raw0[:, :, 1] .*= disp_scale_x
 u_raw0[:, :, 2] .*= disp_scale_y
 u_raw0[:, :, 3] .*= disp_scale_z
-u_raw0 .= clamp.(u_raw0, -max_abs_disp, max_abs_disp)
-omega_raw0 .= clamp.(omega_raw0, -max_abs_rotation, max_abs_rotation)
+u_raw0 .= u_raw0 # clamp.(-max_abs_disp, max_abs_disp
+omega_raw0 .= omega_raw0 #clamp.(-max_abs_rotation, max_abs_rotation
 u0 = geom_relax .* u_raw0 .+ (1 - geom_relax) .* u_prev
 u_prev .= u0
 omega0 = geom_relax .* omega_raw0 .+ (1 - geom_relax) .* omega_prev
@@ -613,11 +649,48 @@ if used2d0
 end
 
 step_ref = Ref(0)
-use_ftot_force = Ref(false)
+use_ftot_force = Ref(true)
 function ensure_gamma!(wing, m)
     if !haskey(wing.sol, "Gamma") || length(wing.sol["Gamma"]) != m
         wing.sol["Gamma"] = zeros(m)
     end
+end
+
+function safe_row_vec(sol::Dict{String, Any}, key::String, i::Int)
+    if !haskey(sol, key)
+        return nothing
+    end
+    arr = sol[key]
+    if !(arr isa AbstractVector) || i > length(arr)
+        return nothing
+    end
+    v = arr[i]
+    if !(v isa AbstractVector) || length(v) < 3
+        return nothing
+    end
+    vv = [Float64(v[1]), Float64(v[2]), Float64(v[3])]
+    if any(!isfinite, vv)
+        return nothing
+    end
+    return vv
+end
+
+function fallback_relative_velocity(wing, i::Int, T::Float64)
+    Xcp = [wing._xm[i], wing._ym[i], wing._zm[i]]
+    Vrel = copy(Vinf(Xcp, T))
+    Vind = safe_row_vec(wing.sol, "Vind", i)
+    Vvpm = safe_row_vec(wing.sol, "Vvpm", i)
+    Vkin = safe_row_vec(wing.sol, "Vkin", i)
+    if Vind !== nothing
+        Vrel .+= Vind
+    end
+    if Vvpm !== nothing
+        Vrel .+= Vvpm
+    end
+    if Vkin !== nothing
+        Vrel .-= Vkin
+    end
+    return Vrel
 end
 
 function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
@@ -626,19 +699,23 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     m = m_span
     prev_forces_snapshot = copy(forces_prev)
 
+    if step == 1
+        println("INFO: row-wing solution keys at step 1: ", collect(keys(row_wings[1].sol)))
+    end
+
     # Extract panel forces directly from each chordwise row.
     # Use FLOWVLM force postprocessing when available (per-panel Ftot), with
     # Gamma-based fallback for robustness.
     force2d = Vector{Vector{Float64}}(undef, m * n_chord)
     for j in 1:n_chord
         ensure_gamma!(row_wings[j], m)
-        Γj = row_wings[j].sol["Gamma"]
-        for i in eachindex(Γj)
-            γ = Γj[i]
-            if !isfinite(γ)
-                γ = 0.0
+        gamma_j = row_wings[j].sol["Gamma"]
+        for i in eachindex(gamma_j)
+            circulation = gamma_j[i]
+            if !isfinite(circulation)
+                circulation = 0.0
             end
-            Γj[i] = clamp(γ, -max_abs_gamma, max_abs_gamma)
+            gamma_j[i] = circulation #clamp -max_abs_gamma, max_abs_gamma
         end
         frow = nothing
         if use_ftot_force[]
@@ -654,44 +731,42 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             end
         end
         for i in 1:m
-            Γ = Γj[i]
-            if !isfinite(Γ)
-                Γ = 0.0
+            gamma = gamma_j[i]
+            if !isfinite(gamma)
+                gamma = 0.0
             end
-            Γ = clamp(Γ, -max_abs_gamma, max_abs_gamma)
+            gamma = gamma # clamp
 
             fx_raw, fy_raw, fz_raw = 0.0, 0.0, 0.0
             if frow != nothing && i <= length(frow)
                 fi = frow[i]
                 if length(fi) == 3 && all(isfinite, fi)
-                    fx_raw = clamp(Float64(fi[1]), -max_abs_force, max_abs_force)
-                    fy_raw = clamp(Float64(fi[2]), -max_abs_force, max_abs_force)
-                    fz_raw = clamp(Float64(fi[3]), -max_abs_force, max_abs_force)
+                    fx_raw = Float64(fi[1]) #clamp -max_abs_force, max_abs_force)
+                    fy_raw = Float64(fi[2]) #clamp -max_abs_force, max_abs_force)
+                    fz_raw = Float64(fi[3]) #clamp -max_abs_force, max_abs_force)
                 else
-                    Xcp = [row_wings[j]._xm[i], row_wings[j]._ym[i], row_wings[j]._zm[i]]
-                    Vloc = Vinf(Xcp, T)
+                    Vloc = fallback_relative_velocity(row_wings[j], i, T)
                     lvec = [
                         row_wings[j]._xn[i+1] - row_wings[j]._xn[i],
                         row_wings[j]._yn[i+1] - row_wings[j]._yn[i],
                         row_wings[j]._zn[i+1] - row_wings[j]._zn[i],
                     ]
-                    Fkj = rho * Γ * cross(Vloc, lvec)
-                    fx_raw = clamp(Fkj[1], -max_abs_force, max_abs_force)
-                    fy_raw = clamp(Fkj[2], -max_abs_force, max_abs_force)
-                    fz_raw = clamp(Fkj[3], -max_abs_force, max_abs_force)
+                    Fkj = rho * gamma * cross(Vloc, lvec)
+                    fx_raw = Fkj[1] # clamp(, -max_abs_force, max_abs_force)
+                    fy_raw = Fkj[2] # clamp(, -max_abs_force, max_abs_force)
+                    fz_raw = Fkj[3] # clamp(, -max_abs_force, max_abs_force)
                 end
             else
-                Xcp = [row_wings[j]._xm[i], row_wings[j]._ym[i], row_wings[j]._zm[i]]
-                Vloc = Vinf(Xcp, T)
+                Vloc = fallback_relative_velocity(row_wings[j], i, T)
                 lvec = [
                     row_wings[j]._xn[i+1] - row_wings[j]._xn[i],
                     row_wings[j]._yn[i+1] - row_wings[j]._yn[i],
                     row_wings[j]._zn[i+1] - row_wings[j]._zn[i],
                 ]
-                Fkj = rho * Γ * cross(Vloc, lvec)
-                fx_raw = clamp(Fkj[1], -max_abs_force, max_abs_force)
-                fy_raw = clamp(Fkj[2], -max_abs_force, max_abs_force)
-                fz_raw = clamp(Fkj[3], -max_abs_force, max_abs_force)
+                Fkj = rho * gamma * cross(Vloc, lvec)
+                fx_raw = Fkj[1] # clamp( , -max_abs_force, max_abs_force)
+                fy_raw = Fkj[2] # clamp( , -max_abs_force, max_abs_force)
+                fz_raw = Fkj[3] # clamp( , -max_abs_force, max_abs_force)
             end
 
             fx = force_relax * fx_raw + (1 - force_relax) * forces_prev[i, j, 1]
@@ -718,6 +793,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         "step"=>step,
         "n_span"=>m,
         "n_chord"=>n_chord,
+        "indexing"=>"span-major",
         "dt"=>dt,
         "ttot"=>ttot,
         "eta_span"=>eta_span_fluid,
@@ -741,8 +817,8 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         u_raw[:, :, 1] .*= disp_scale_x
         u_raw[:, :, 2] .*= disp_scale_y
         u_raw[:, :, 3] .*= disp_scale_z
-        u_raw .= clamp.(u_raw, -max_abs_disp, max_abs_disp)
-        omega_raw .= clamp.(omega_raw, -max_abs_rotation, max_abs_rotation)
+        u_raw .= u_raw # clamp.(, -max_abs_disp, max_abs_disp)
+        omega_raw .= omega_raw # clamp.(, -max_abs_rotation, max_abs_rotation)
         if any(!isfinite, u_raw)
             @warn "Non-finite displacement received at step $step; reusing previous geometry"
             u_raw .= u_prev
@@ -753,6 +829,12 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         end
         u = geom_relax .* u_raw .+ (1 - geom_relax) .* u_prev
         omega = geom_relax .* omega_raw .+ (1 - geom_relax) .* omega_prev
+        if step == 1 || step % 20 == 0
+            println(
+                "INFO: geometry magnitude at step $step: max|u|=$(maximum(abs.(u))) " *
+                "max|omega|=$(maximum(abs.(omega)))"
+            )
+        end
         geom_res = norm(u - u_prev) / max(norm(u), 1.0e-16)
         push!(geom_res_hist, geom_res)
         u_prev .= u

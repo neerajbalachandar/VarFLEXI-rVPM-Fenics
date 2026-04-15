@@ -690,7 +690,7 @@ def solve_nonlinear_step(nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, d
 
 sig = Function(Vsig, name="sigma") # Stress output field
 
-out_dir = "../results"
+out_dir = "../results/v10_v8/"
 os.makedirs(out_dir, exist_ok=True)
 xdmf_path = os.path.join(out_dir, "elastodynamics-results-v10-nonlinear-flap.xdmf")
 xdmf_file = XDMFFile(xdmf_path)
