@@ -92,7 +92,7 @@ twist_root      = 0.0
 twist_tip       = 0.0
 gamma           = 0.0
 
-n_span          = 80
+n_span          = 30
 
 wakelength      = 2.75*b
 ttot            = parse(Float64, get(ENV, "COUPLING_TTOT", "4.0"))
@@ -130,7 +130,7 @@ disp_scale_y     = 1.00           # debug alignment: apply full displacement
 disp_scale_z     = 1.00           # full normal update
 
 # 2D coupling grid (span x chord) used for socket data exchange
-n_chord     = 8
+n_chord     = 6
 eta_chord_edges  = collect(range(0.0, 1.0; length=n_chord+1))
 eta_chord_cp     = [(eta_chord_edges[j] + 0.75*(eta_chord_edges[j+1]-eta_chord_edges[j]))
                      for j in 1:n_chord]
@@ -933,7 +933,7 @@ uns.run_simulation(simulation, nsteps;
     shed_unsteady=use_unsteady_shedding,
     unsteady_shedcrit=unsteady_shedcrit,
     omit_shedding=omit_shedding_rows,
-    wake_coupled=true,
+    wake_coupled=false,
     vlm_rlx=vlm_rlx,
     extra_runtime_function=runtime_pipeline,
     save_path=save_path,

@@ -35,11 +35,11 @@ tip_chord = 0.12
 thickness_ratio = 0.12
 leading_edge_sweep = 0.0
 
-nx, ny = 24, 120
+nx, ny = 12, 120
 mesh = RectangleMesh(Point(0.0, 0.0), Point(1.0, span), nx, ny)
 
-n_span = 80
-n_chord = 8
+n_span = 30
+n_chord = 6
 m_panels_comm = n_span * n_chord
 # Use span-panel center stations for communication so eta metadata matches
 # the actual coupling sample locations used in extract_coupling_node_indices.
@@ -647,7 +647,7 @@ def build_coupling_targets(n_span, n_chord, eta_chord):
     return np.asarray(targets, dtype=float)
 
 
-def build_local_rbf_map(fluid_points, solid_points, epsilon, n_neighbors=32):
+def build_local_rbf_map(fluid_points, solid_points, epsilon, n_neighbors=1):
     fluid_points = np.asarray(fluid_points, dtype=float)
     solid_points = np.asarray(solid_points, dtype=float)
     eps2 = max(float(epsilon) ** 2, 1.0e-16)
@@ -838,7 +838,7 @@ if DEBUG_IO:
 interface_node_ids = aero_node_ids
 interface_coords = outer_surface_coords[interface_node_ids, :]
 print("Building local RBF transfer map...")
-nbr_ids, nbr_w = build_local_rbf_map(cp_nodes, interface_coords, rbf_epsilon, n_neighbors=16)
+nbr_ids, nbr_w = build_local_rbf_map(cp_nodes, interface_coords, rbf_epsilon, n_neighbors=4)
 print(
     f"Conservative mapping: {cp_nodes.shape[0]} fluid points <- "
     f"{interface_coords.shape[0]} solid interface nodes"
