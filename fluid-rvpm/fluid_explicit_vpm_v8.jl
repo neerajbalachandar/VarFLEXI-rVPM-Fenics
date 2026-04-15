@@ -77,6 +77,7 @@ end
 AOA             = parse(Float64, get(ENV, "FLUID_AOA_DEG", "8.0"))
 magVinf         = parse(Float64, get(ENV, "FLUID_VINF", "8.0"))
 rho             = 1.0
+DEBUG_IO        = lowercase(get(ENV, "COUPLING_DEBUG_IO", "0")) ∉ ("0", "false", "no")
 
 # Match solid geometry (cantilever wing: y in [0, span])
 span            = 1.0
@@ -116,10 +117,8 @@ println(
 
 # Coupling stabilization (numerical damping)
 geom_relax       = 1.0           # 0<geom_relax<=1; lower is more damping
-force_relax      = 1.0           # 0<force_relax<=1/ 4 / pi) * F1 * F2)
-end
+force_relax      = 1.0           # 0<force_relax<=1
 
-function vlm.VLMSolver._V_Ainf_out(A::Vector{<:vlm.
 # max_abs_disp     = b         # clamp incoming displacement magnitude
 
 # Run the simulation once without capping
@@ -272,7 +271,8 @@ mkpath(save_path)
 max_particles = Int((nsteps+1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step+1) + p_per_step))
 
 # Enable shedding from all chordwise rows in this v8 variant.
-omit_shedding_rows = Int[]
+# omit_shedding_rows = Int[]
+omit_shedding_rows = collect(1:max(0, n_chord-1))
 
 # Wake treatment adapted from standard FLOWUnsteady examples to keep the
 # particle field bounded during long coupled runs.
@@ -605,6 +605,36 @@ end
 step_hist = Int[]
 geom_res_hist = Float64[]
 force_res_hist = Float64[]
+force_trace_path = joinpath(save_path, run_name * "_force_payload_history.jsonl")
+force_trace_io = open(force_trace_path, "w")
+
+# Save fluid-side coupling control-point coordinates using the same flattening
+# convention as payload exchange: idx=(i_span-1)*n_chord + j_chord.
+fluid_cp_csv = joinpath(save_path, "fluid_coupling_cp_coords.csv")
+open(fluid_cp_csv, "w") do io
+    println(io, "index,i_span,j_chord,x_cp,y_cp,z_cp")
+    idx = 0
+    for i in 1:m_span
+        for j in 1:n_chord
+            idx += 1
+            wref = row_wing_refs[j]
+            println(
+                io,
+                string(
+                    idx, ",", i, ",", j, ",",
+                    wref._xm[i], ",", wref._ym[i], ",", wref._zm[i]
+                )
+            )
+        end
+    end
+end
+if DEBUG_IO
+    first_ref = [row_wing_refs[1]._xm[1], row_wing_refs[1]._ym[1], row_wing_refs[1]._zm[1]]
+    last_ref = [row_wing_refs[end]._xm[m_span], row_wing_refs[end]._ym[m_span], row_wing_refs[end]._zm[m_span]]
+    println("FLUID REF first CP = ", first_ref)
+    println("FLUID REF last  CP = ", last_ref)
+    println("Saved fluid coupling CP coordinates: ", fluid_cp_csv)
+end
 
 # Receive initial geometry from solid before launching the continuous run.
 msg0 = read_json_line(sock, "init")
@@ -617,6 +647,10 @@ if haskey(msg0, "dt")
 end
 u_raw0, _, used2d0 = decode_geometry_payload(msg0, eta_span_fluid, eta_chord_comm)
 omega_raw0, _, _ = decode_rotation_payload(msg0, eta_span_fluid, eta_chord_comm)
+if DEBUG_IO
+    println("RECV init first point = ", vec(u_raw0[1, 1, :]))
+    println("RECV init last point  = ", vec(u_raw0[end, end, :]))
+end
 u_raw0[:, :, 1] .*= disp_scale_x
 u_raw0[:, :, 2] .*= disp_scale_y
 u_raw0[:, :, 3] .*= disp_scale_z
@@ -789,6 +823,20 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     push!(step_hist, step)
     push!(force_res_hist, force_res)
 
+    println(
+        force_trace_io,
+        JSON.json(
+            Dict(
+                "step" => step,
+                "n_span" => m,
+                "n_chord" => n_chord,
+                "indexing" => "span-major",
+                "force" => force2d,
+            ),
+        ),
+    )
+    flush(force_trace_io)
+
     write(sock, JSON.json(Dict(
         "step"=>step,
         "n_span"=>m,
@@ -814,6 +862,10 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         end
         u_raw, _, used2d = decode_geometry_payload(msg, eta_span_fluid, eta_chord_comm)
         omega_raw, _, _ = decode_rotation_payload(msg, eta_span_fluid, eta_chord_comm)
+        if DEBUG_IO && (step == 1 || step % 20 == 0)
+            println("RECV step=$(step) first point = ", vec(u_raw[1, 1, :]))
+            println("RECV step=$(step) last point  = ", vec(u_raw[end, end, :]))
+        end
         u_raw[:, :, 1] .*= disp_scale_x
         u_raw[:, :, 2] .*= disp_scale_y
         u_raw[:, :, 3] .*= disp_scale_z
@@ -905,6 +957,8 @@ open(diag_path, "w") do io
 end
 
 close(sock)
+close(force_trace_io)
 println("Fluid solver finished.")
 println("Fluid outputs saved in: $save_path")
 println("Fluid diagnostics saved in: $diag_path")
+println("Fluid force history saved in: $force_trace_path")

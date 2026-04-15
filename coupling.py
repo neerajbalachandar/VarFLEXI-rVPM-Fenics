@@ -83,6 +83,8 @@ log_csv = os.path.join(results_dir, "coupling_history.csv")
 log_fp = open(log_csv, "w", newline="")
 writer = csv.writer(log_fp)
 writer.writerow(["step", "n_forces", "force_relax_used", "force_residual", "sample_fx", "sample_fy", "sample_fz"])
+forces_jsonl = os.path.join(results_dir, "forces_sent_received_history.jsonl")
+forces_fp = open(forces_jsonl, "w")
 
 prev_forces: Optional[List[List[float]]] = None
 aitken_relax = FORCE_RELAX
@@ -141,6 +143,7 @@ for step in range(1, NSTEPS + 1):
     # Optional explicit coupling relaxation for stability.
     # This does not turn the scheme into strongly coupled GS sub-iterations,
     # but helps damp loose-coupling oscillations.
+    forces_received_raw = [list(map(float, f[:3])) for f in forces]
     force_residual = 0.0
     relax_used = FORCE_RELAX
     if prev_forces is not None and len(prev_forces) == len(forces):
@@ -177,6 +180,22 @@ for step in range(1, NSTEPS + 1):
     # DEBUG PRINT
     print(f"Sample force[0] = {forces[0]} (relax={relax_used:.3f}, residual={force_residual:.3e})")
 
+    forces_sent = [list(map(float, f[:3])) for f in forces]
+    json.dump(
+        {
+            "step": step,
+            "n_span": n_span,
+            "n_chord": n_chord,
+            "indexing": geo_data.get("indexing", "span-major"),
+            "force_relax_used": relax_used,
+            "force_residual": force_residual,
+            "force_received": forces_received_raw,
+            "force_sent": forces_sent,
+        },
+        forces_fp,
+    )
+    forces_fp.write("\n")
+
     writer.writerow([
         step,
         len(forces),
@@ -194,6 +213,8 @@ for step in range(1, NSTEPS + 1):
 print("Coupling finished.")
 print(f"Coupling diagnostics saved at: {log_csv}")
 log_fp.close()
+forces_fp.close()
+print(f"Force transfer history saved at: {forces_jsonl}")
 
 fluid_conn.close()
 solid_conn.close()

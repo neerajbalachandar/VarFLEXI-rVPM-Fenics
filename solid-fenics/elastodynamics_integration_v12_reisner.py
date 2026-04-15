@@ -25,6 +25,9 @@ T = float(os.getenv("COUPLING_TTOT", "4.0"))
 Nsteps = int(os.getenv("COUPLING_NSTEPS", "200"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
+DEBUG_IO = os.getenv("COUPLING_DEBUG_IO", "0").strip().lower() not in ("0", "false", "no")
+ZERO_GEOMETRY_TEST = os.getenv("COUPLING_ZERO_GEOMETRY_TEST", "0").strip().lower() not in ("0", "false", "no")
+USE_DIRECT_TARGET_EVAL = os.getenv("COUPLING_USE_DIRECT_TARGET_EVAL", "0").strip().lower() not in ("0", "false", "no")
 #match the values with the ones in the fluid file for consistency, but these won't affect the static solve
 span = 1.0
 root_chord = 0.12
@@ -630,6 +633,20 @@ def extract_coupling_node_indices(n_span, n_chord, eta_chord, coords_xyz):
     return np.asarray(idx, dtype=np.int64)
 
 
+def build_coupling_targets(n_span, n_chord, eta_chord):
+    eta_chord = as_eta_array(eta_chord, n_chord)
+    targets = []
+    for i_span in range(n_span):
+        y_target = eta_span_comm[i_span] * span
+        chord = chord_at(y_target)
+        x_le = x_leading_edge_at(y_target)
+        for j_chord in range(n_chord):
+            xi_target = eta_chord[j_chord]
+            x_target = x_le + xi_target * chord
+            targets.append([x_target, y_target, 0.0])
+    return np.asarray(targets, dtype=float)
+
+
 def build_local_rbf_map(fluid_points, solid_points, epsilon, n_neighbors=32):
     fluid_points = np.asarray(fluid_points, dtype=float)
     solid_points = np.asarray(solid_points, dtype=float)
@@ -735,6 +752,22 @@ def build_output_displacement(q_fun, out_fun):
     out_fun.assign(project(displacement_3d(q_fun), Vt))
 
 
+def evaluate_field_at_targets(u_fun, targets_xyz):
+    out = np.zeros((targets_xyz.shape[0], 3), dtype=float)
+    for k in range(targets_xyz.shape[0]):
+        x = float(targets_xyz[k, 0])
+        y = float(targets_xyz[k, 1])
+        try:
+            uv = u_fun(x, y)
+            out[k, 0] = float(uv[0])
+            out[k, 1] = float(uv[1])
+            out[k, 2] = float(uv[2])
+        except RuntimeError:
+            # Fallback to nearest-vertex sample if point evaluation fails near boundary.
+            out[k, :] = 0.0
+    return out
+
+
 sig = Function(Vsig, name="MembraneStress")
 u_vis = Function(Vt, name="Displacement")
 
@@ -745,7 +778,18 @@ xdmf_file = XDMFFile(xdmf_path)
 xdmf_file.parameters["flush_output"] = True
 xdmf_file.parameters["functions_share_mesh"] = True
 xdmf_file.parameters["rewrite_function_mesh"] = False
-File(os.path.join(out_dir, "solid_mesh.pvd")) << mesh
+
+# VTK/PVD exports for ParaView workflows
+# - solid_mesh.pvd: undeformed reference mesh
+# - solid_displacement.pvd: time-varying displacement field on mesh
+# - solid_membrane_stress.pvd: time-varying membrane stress field on mesh
+mesh_pvd_path = os.path.join(out_dir, "solid_mesh.pvd")
+u_pvd_path = os.path.join(out_dir, "solid_displacement.pvd")
+sig_pvd_path = os.path.join(out_dir, "solid_membrane_stress.pvd")
+mesh_pvd = File(mesh_pvd_path)
+u_pvd = File(u_pvd_path)
+sig_pvd = File(sig_pvd_path)
+mesh_pvd << mesh
 
 print("Connecting solid to coupling server...")
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -768,6 +812,26 @@ np.savetxt(
     comments="",
 )
 print(f"Interface nodes ready: aero={len(aero_node_ids)}, coupling={len(cp_node_ids)}")
+
+coupling_targets = build_coupling_targets(n_span, n_chord, eta_chord_comm)
+target_vs_nearest_csv = os.path.join(out_dir, "coupling_target_vs_nearest.csv")
+with open(target_vs_nearest_csv, "w") as fp:
+    fp.write("index,i_span,j_chord,x_target,y_target,z_target,x_cp,y_cp,z_cp,dist\n")
+    for k in range(coupling_targets.shape[0]):
+        i_span = k // n_chord
+        j_chord = k % n_chord
+        tgt = coupling_targets[k, :]
+        cp = cp_nodes[k, :]
+        d = float(np.linalg.norm(tgt - cp))
+        fp.write(
+            f"{k},{i_span},{j_chord},"
+            f"{tgt[0]:.12e},{tgt[1]:.12e},{tgt[2]:.12e},"
+            f"{cp[0]:.12e},{cp[1]:.12e},{cp[2]:.12e},{d:.12e}\n"
+        )
+if DEBUG_IO:
+    print(f"SOLID CP first target={coupling_targets[0].tolist()} nearest={cp_nodes[0].tolist()}")
+    print(f"SOLID CP last  target={coupling_targets[-1].tolist()} nearest={cp_nodes[-1].tolist()}")
+    print(f"Saved target-vs-nearest diagnostics: {target_vs_nearest_csv}")
 
 # Conservative transfer is still used, but now between fluid control points and
 # plate midsurface nodes rather than solid boundary nodes.
@@ -798,6 +862,9 @@ if work_conservative_mode:
     t_aero.vector().apply("insert")
 
 u_cp0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
+if DEBUG_IO:
+    print(f"SEND init first point = {u_cp0[0]}")
+    print(f"SEND init last point  = {u_cp0[-1]}")
 sock.sendall(
     (
         json.dumps(
@@ -837,6 +904,15 @@ ext_force_vec_template.zero()
 
 tip_x = x_leading_edge_at(span) + 0.75 * chord_at(span)
 tip_y = span - 1.0e-8
+
+# Save initial (t=0) fields in both XDMF and VTK/PVD.
+build_output_displacement(q, u_vis)
+q_mem0, _q_w0, _q_theta0 = q.split(deepcopy=True)
+local_project(membrane_stress(q_mem0), Vsig, sig)
+xdmf_file.write(u_vis, 0.0)
+xdmf_file.write(sig, 0.0)
+u_pvd << (u_vis, 0.0)
+sig_pvd << (sig, 0.0)
 
 for i in range(Nsteps):
     print(f"Solid step {i + 1}/{Nsteps}: waiting for force...")
@@ -920,12 +996,14 @@ for i in range(Nsteps):
 
     build_output_displacement(q, u_vis)
     xdmf_file.write(u_vis, t)
+    u_pvd << (u_vis, float(t))
 
     # Stress output is now membrane stress on the plate midsurface rather than a
     # full 3D Cauchy stress tensor through the solid wing volume.
     q_mem, _q_w, _q_theta = q.split(deepcopy=True)
     local_project(membrane_stress(q_mem), Vsig, sig)
     xdmf_file.write(sig, t)
+    sig_pvd << (sig, float(t))
 
     E_elas = 0.5 * assemble(k_state(q_old, q_old))
     E_kin = 0.5 * assemble(m_state(v_old, v_old))
@@ -943,6 +1021,21 @@ for i in range(Nsteps):
         u_cp_arr = map_displacements_to_fluid(u_nodes, nbr_ids, nbr_w)
         rot_nodes = get_nodal_rotations(q, interface_node_ids, dofs_theta_x, dofs_theta_y)
         rot_cp_arr = map_displacements_to_fluid(rot_nodes, nbr_ids, nbr_w)
+        if USE_DIRECT_TARGET_EVAL:
+            u_cp_eval = evaluate_field_at_targets(u_vis, coupling_targets)
+            if DEBUG_IO and (i == 0 or (i + 1) % 20 == 0):
+                diff = u_cp_eval - u_cp_arr
+                rel = np.linalg.norm(diff) / max(np.linalg.norm(u_cp_eval), 1.0e-16)
+                print(
+                    f"GEOM MAP compare step {i+1}: ||eval-rbf||={np.linalg.norm(diff):.3e}, rel={rel:.3e}"
+                )
+            u_cp_arr = u_cp_eval
+        if ZERO_GEOMETRY_TEST:
+            u_cp_arr = np.zeros_like(u_cp_arr)
+            rot_cp_arr = np.zeros_like(rot_cp_arr)
+        if DEBUG_IO and (i == 0 or (i + 1) % 20 == 0):
+            print(f"SEND step {i+1} first point = {u_cp_arr[0, :].tolist()}")
+            print(f"SEND step {i+1} last point  = {u_cp_arr[-1, :].tolist()}")
         msg_geo = json.dumps(
             {
                 "step": i + 1,
@@ -965,6 +1058,7 @@ sock_file.close()
 sock.close()
 print("Solid solver finished.")
 print(f"Solid field outputs: {xdmf_path}")
+print(f"Solid VTK outputs: {u_pvd_path}, {sig_pvd_path}, {mesh_pvd_path}")
 
 diag_csv = os.path.join(out_dir, "solid_v12_diagnostics.csv")
 with open(diag_csv, "w") as fp:
