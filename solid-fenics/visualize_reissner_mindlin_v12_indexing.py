@@ -42,10 +42,10 @@ tip_chord = 0.12
 thickness_ratio = 0.12
 leading_edge_sweep = 0.0
 
-nx = int(os.getenv("INDEX_VIZ_NX", "120"))
-ny = int(os.getenv("INDEX_VIZ_NY", "12"))
-n_span = int(os.getenv("INDEX_VIZ_NSPAN", "30"))
-n_chord = int(os.getenv("INDEX_VIZ_NCHORD", "6"))
+nx = int(os.getenv("INDEX_VIZ_NX", "40"))
+ny = int(os.getenv("INDEX_VIZ_NY", "120"))
+n_span = int(os.getenv("INDEX_VIZ_NSPAN", "60"))
+n_chord = int(os.getenv("INDEX_VIZ_NCHORD", "10"))
 rbf_epsilon = float(os.getenv("INDEX_VIZ_RBF_EPS", "1.0"))
 rbf_neighbors = int(os.getenv("INDEX_VIZ_RBF_NEIGHBORS", "1"))
 label_stride = int(os.getenv("INDEX_VIZ_LABEL_STRIDE", "40"))

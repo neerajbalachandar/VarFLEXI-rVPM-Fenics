@@ -35,11 +35,11 @@ tip_chord = 0.12
 thickness_ratio = 0.12
 leading_edge_sweep = 0.0
 
-nx, ny = 12, 120
+nx, ny = 40, 120
 mesh = RectangleMesh(Point(0.0, 0.0), Point(1.0, span), nx, ny)
 
-n_span = 30
-n_chord = 6
+n_span = 60
+n_chord = 10
 m_panels_comm = n_span * n_chord
 # Use span-panel center stations for communication so eta metadata matches
 # the actual coupling sample locations used in extract_coupling_node_indices.
