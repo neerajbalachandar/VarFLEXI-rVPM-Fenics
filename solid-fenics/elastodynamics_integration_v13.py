@@ -1,58 +1,45 @@
-#note:
-# this file now models the wing as a 2D plate midsurface instead of a 3D solid.
-# uses reissner-mindlin primary variables (membrane
-# displacement, transverse displacement, rotations),KL Plate theory is not used because it would require C1 elements and/or projection
 from dolfin import *
-import numpy as np
-import matplotlib.pyplot as plt
-import socket
 import json
 import os
-from scipy.spatial import cKDTree
+import socket
 
-from fenics_shells import e as shell_e
-from fenics_shells import gamma as rm_gamma
-from fenics_shells import kirchhoff_love_theta
-from fenics_shells import k as shell_k
-from fenics_shells import psi_M
-from fenics_shells import psi_N
-from fenics_shells import psi_T
+import numpy as np
+from scipy.spatial import cKDTree
 
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
+
 
 T = float(os.getenv("COUPLING_TTOT", "4.0"))
 Nsteps = int(os.getenv("COUPLING_NSTEPS", "200"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
-DEBUG_IO = os.getenv("COUPLING_DEBUG_IO", "0").strip().lower() not in ("0", "false", "no")
-ZERO_GEOMETRY_TEST = os.getenv("COUPLING_ZERO_GEOMETRY_TEST", "0").strip().lower() not in ("0", "false", "no")
-USE_DIRECT_TARGET_EVAL = os.getenv("COUPLING_USE_DIRECT_TARGET_EVAL", "0").strip().lower() not in ("0", "false", "no")
-#match the values with the ones in the fluid file for consistency, but these won't affect the static solve
-span = 1.0
-root_chord = 0.12
-tip_chord = 0.12
-thickness_ratio = 0.12
-leading_edge_sweep = 0.0
 
-nx, ny = 40, 120
-mesh = RectangleMesh(Point(0.0, 0.0), Point(1.0, span), nx, ny)
+span = float(os.getenv("SOLID_SPAN", "1.0"))
+root_chord = float(os.getenv("SOLID_ROOT_CHORD", "0.12"))
+tip_chord = float(os.getenv("SOLID_TIP_CHORD", "0.12"))
+thickness_ratio = float(os.getenv("SOLID_THICKNESS_RATIO", "0.12"))
+leading_edge_sweep = float(os.getenv("SOLID_LE_SWEEP", "0.0"))
 
-n_span = 80
-n_chord = 1
-m_panels_comm = n_span * n_chord
-# Use span-panel center stations for communication so eta metadata matches
-# the actual coupling sample locations used in extract_coupling_node_indices.
-eta_span_comm = (np.arange(n_span, dtype=float) + 0.5) / n_span
-eta_chord_edges = np.linspace(0.0, 1.0, n_chord + 1)
-eta_chord_comm = eta_chord_edges[:-1] + 0.75 * (
-    eta_chord_edges[1:] - eta_chord_edges[:-1]
-)
+nx = int(os.getenv("SOLID_NX", "12"))
+ny = int(os.getenv("SOLID_NY", "120"))
+nz = int(os.getenv("SOLID_NZ", "6"))
+
+# Communication stations for the fluid v9 spanwise panels.
+n_span_comm = int(os.getenv("COUPLING_NSPAN_COMM", "4"))
+n_chord_comm = 1
+m_panels_comm = n_span_comm * n_chord_comm
+eta_span_comm = (np.arange(n_span_comm, dtype=float) + 0.5) / n_span_comm
+eta_cp = float(os.getenv("COUPLING_ETA_CP", "0.75"))
+eta_cp_comm = np.array([eta_cp], dtype=float)
 
 work_conservative_mode = True
-rbf_epsilon = 1.0
-work_rel_tol = 1.0e-3
-work_conv_window = 10
+rbf_epsilon = float(os.getenv("COUPLING_RBF_EPS", "0.08"))
+rbf_neighbors = int(os.getenv("COUPLING_RBF_NEIGHBORS", "24"))
+max_abs_force_component = float(os.getenv("COUPLING_MAX_FORCE_COMPONENT", "5.0e3"))
+
+DEBUG_IO = os.getenv("COUPLING_DEBUG_IO", "0").strip().lower() not in ("0", "false", "no")
+edge_eval_xi_eps = float(os.getenv("COUPLING_EDGE_EVAL_XI_EPS", "1.0e-6"))
 
 
 def chord_at(y_val):
@@ -65,300 +52,192 @@ def x_leading_edge_at(y_val):
     return leading_edge_sweep * eta
 
 
-plate_thickness = root_chord * thickness_ratio
-h = Constant(plate_thickness)
+def naca_half_thickness(xi):
+    xi_clip = min(max(xi, 0.0), 1.0)
+    return 5.0 * thickness_ratio * (
+        0.2969 * np.sqrt(xi_clip)
+        - 0.1260 * xi_clip
+        - 0.3516 * xi_clip ** 2
+        + 0.2843 * xi_clip ** 3
+        - 0.1015 * xi_clip ** 4
+    )
 
 
-# We still start from a unit rectangle, but now only map the in-plane chordwise
-# coordinate to the physical tapered/swept wing planform. There is no 3D airfoil
-# thickness projection here because the structure is a plate midsurface.
+mesh = BoxMesh(Point(0.0, 0.0, -1.5e-3), Point(1.0, span, 1.5e-3), nx, ny, nz)
+
 coords = mesh.coordinates()
+min_half_t = 0.10 * root_chord * thickness_ratio / max(nz, 1)
 for i in range(coords.shape[0]):
-    xi = coords[i, 0]
+    xi = min(max(coords[i, 0], 1.0e-4), 1.0)
     y_val = coords[i, 1]
+    z_ref = coords[i, 2]
     chord = chord_at(y_val)
-    coords[i, 0] = x_leading_edge_at(y_val) + xi * chord
-
-
-def right(x, on_boundary):
-    return near(x[1], 0.0) and on_boundary # BC at span edge - left is front
+    x_le = x_leading_edge_at(y_val)
+    zeta = 2.0 * z_ref
+    half_t = max(chord * naca_half_thickness(xi), min_half_t)
+    coords[i, 0] = x_le + xi * chord
+    coords[i, 2] = zeta * half_t
 
 
 def left(x, on_boundary):
-    return near(x[1], span) and on_boundary
+    return near(x[1], 0.0) and on_boundary
 
 
-# The unknowns are now:
-# u_mem  -> in-plane membrane displacement (ux, uy)
-# w      -> transverse displacement
-# theta  -> independent plate rotations
-# This mixed space replaces the old 3D vector displacement field.
-U_el = VectorElement("CG", mesh.ufl_cell(), 2, dim=2)
-W_el = FiniteElement("CG", mesh.ufl_cell(), 2)
-T_el = VectorElement("CG", mesh.ufl_cell(), 2, dim=2)
-state_element = MixedElement([U_el, W_el, T_el])
-V = FunctionSpace(mesh, state_element)
+facet_markers = MeshFunction("size_t", mesh, mesh.topology().dim() - 1)
+facet_markers.set_all(0)
 
-Vt = VectorFunctionSpace(mesh, "CG", 1, dim=3)
+panel_tol_x = 0.75 * (root_chord / max(nx, 1))
+panel_tol_z = 1.25 * (root_chord * thickness_ratio / max(nz, 1))
+
+
+class AeroSurface(SubDomain):
+    def inside(self, X, on_boundary):
+        if not on_boundary:
+            return False
+        y_val = X[1]
+        chord = chord_at(y_val)
+        if chord <= 0.0:
+            return False
+        x_le = x_leading_edge_at(y_val)
+        xi = (X[0] - x_le) / max(chord, 1.0e-12)
+        if xi < -0.02 or xi > 1.02:
+            return False
+        z_surf = chord * naca_half_thickness(xi)
+        return abs(abs(X[2]) - z_surf) <= panel_tol_z
+
+
+aero_surface = AeroSurface()
+aero_surface.mark(facet_markers, 5)
+ds_aero = Measure("ds", domain=mesh, subdomain_data=facet_markers)
+
+V = VectorFunctionSpace(mesh, "CG", 1)
+Vt = VectorFunctionSpace(mesh, "CG", 1)
 Vsig = TensorFunctionSpace(mesh, "DG", 0)
 
-# Aerodynamic loading is still represented as a 3-component vector field so the
-# socket coupling format remains compatible with the fluid side.
-t_aero = Function(Vt, name="AerodynamicLoad")
+t_aero = Function(Vt, name="AerodynamicTraction")
 
-# wing elastic properties
-E = 5e9
-nu = 0.35
-rho_s = 1400.0
+E = float(os.getenv("SOLID_E", "6.8e10"))
+nu = float(os.getenv("SOLID_NU", "0.35"))
+mu = Constant(E / (2.0 * (1.0 + nu)))
+lmbda = Constant(E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu)))
+rho_s = float(os.getenv("SOLID_RHO", "1600.0"))
 rho = Constant(rho_s)
-kappa_shear = Constant(5.0 / 6.0)
-eta_m = Constant(0.05)
-eta_k = Constant(5.0e-5)
+eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.8")))
+eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-4")))
 
-# generalized-alpha method parameters for time integration of the nonlinear plate dynamics.
 alpha_m = Constant(0.10)
 alpha_f = Constant(0.20)
 gamma = Constant(0.5 + alpha_f - alpha_m)
 beta = Constant((gamma + 0.5) ** 2 / 4.0)
 
 print(
-    f"Plate setup (solid): span={span} m, c_root={root_chord} m, c_tip={tip_chord} m, "
-    f"h={plate_thickness:.4e} m, E={E:.3e} Pa, rho_s={rho_s} kg/m^3"
+    f"Linear solid v13: span={span} m, c_root={root_chord} m, c_tip={tip_chord} m, "
+    f"E={E:.3e} Pa, rho={rho_s} kg/m^3, comm_stations={n_span_comm}"
 )
-print(f"Solid time config: T={T} s, Nsteps={Nsteps}, dt={dt_value}")
+print(f"Time setup: T={T} s, Nsteps={Nsteps}, dt={dt_value}")
 
-
-# Keep a dedicated TrialFunction for Jacobian linearization of the nonlinear
-# mixed plate residual.
-dq_trial = TrialFunction(V)
-q_test = TestFunction(V)
-q = Function(V, name="PlateState")
-q_old = Function(V)
+du = TrialFunction(V)
+u_ = TestFunction(V)
+u = Function(V, name="Displacement")
+u_old = Function(V)
 v_old = Function(V)
 a_old = Function(V)
 
-u_zero = Constant((0.0, 0.0))
-bc_u = DirichletBC(V.sub(0), u_zero, left)
-bc_w = DirichletBC(V.sub(1), Constant(0.0), left)
-#clamp the root edge (y=0)
-bc_theta = DirichletBC(V.sub(2), u_zero, left)
-bcs = [bc_u, bc_w, bc_theta]
-
-I2 = Identity(2)
+zero = Constant((0.0, 0.0, 0.0))
+bc = DirichletBC(V, zero, left)
 
 
-## Plate kinematics and constitutive terms
-## These replace the old 3D solid strain/stress definitions.
-def membrane_strain(u_mem):
-    return shell_e(u_mem)
+def sigma(r):
+    eps = sym(grad(r))
+    return 2.0 * mu * eps + lmbda * tr(eps) * Identity(len(r))
 
 
-def curvature(theta):
-    return shell_k(theta)
+def m(u_trial, u_test):
+    return rho * inner(u_trial, u_test) * dx
 
 
-def membrane_stress(u_mem):
-    eps = membrane_strain(u_mem)
-    coeff = E * plate_thickness / (1.0 - nu ** 2)
-    return coeff * ((1.0 - nu) * eps + nu * tr(eps) * I2)
+def k(u_trial, u_test):
+    return inner(sigma(u_trial), sym(grad(u_test))) * dx
 
 
-def bending_moment(theta):
-    kap = curvature(theta)
-    coeff = E * plate_thickness ** 3 / (12.0 * (1.0 - nu ** 2))
-    return coeff * ((1.0 - nu) * kap + nu * tr(kap) * I2)
+def c(u_trial, u_test):
+    return eta_m * m(u_trial, u_test) + eta_k * k(u_trial, u_test)
 
 
-def split_state(x):
-    # `ufl.split(x)` works for mixed Arguments/Coefficients, but fails for
-    # algebraic expressions like `avg(...)` that produce a UFL `Sum`.
-    # Fall back to explicit component indexing for those cases.
-    try:
-        return split(x)
-    except Exception:
-        u_mem = as_vector((x[0], x[1]))
-        w = x[2]
-        theta = as_vector((x[3], x[4]))
-        return u_mem, w, theta
+def Wext(u_test):
+    return dot(u_test, t_aero) * ds_aero(5)
 
 
-def displacement_3d(x):
-    # CHANGED:
-    # Rebuild a 3D-looking displacement vector from plate unknowns so the aero
-    # transfer and output paths can keep using [ux, uy, uz]-style data.
-    u_mem, w, _theta = split_state(x)
-    return as_vector((u_mem[0], u_mem[1], w))
-
-
-def m_state(x, y):
-    # CHANGED:
-    # Plate inertia = translational inertia of the midsurface + rotary inertia.
-    u_x, w_x, theta_x = split_state(x)
-    u_y, w_y, theta_y = split_state(y)
-    inertia_rot = rho * h ** 3 / 12.0
-    return (
-        rho * h * (inner(u_x, u_y) + w_x * w_y) * dx
-        + inertia_rot * inner(theta_x, theta_y) * dx
-    )
-
-
-def k_state(x, y):
-    # CHANGED:
-    # Plate stiffness now contains membrane, bending, and transverse shear parts.
-    # The shear term is what makes this a Reissner-Mindlin model rather than a
-    # pure Kirchhoff-Love model.
-    u_x, w_x, theta_x = split_state(x)
-    u_y, w_y, theta_y = split_state(y)
-
-    eps_y = membrane_strain(u_y)
-    kap_y = curvature(theta_y)
-    gam_x = rm_gamma(theta_x, w_x)
-    gam_y = rm_gamma(theta_y, w_y)
-
-    # Use explicit stress-resultant virtual work instead of polarization of
-    # energy terms. This avoids mixed-form arity issues during Jacobian build.
-    N_x = membrane_stress(u_x)
-    M_x = bending_moment(theta_x)
-    G_shear = Constant(E / (2.0 * (1.0 + nu)))
-    K_shear = kappa_shear * G_shear * h
-
-    membrane_term = inner(N_x, eps_y) * dx
-    bending_term = inner(M_x, kap_y) * dx
-    shear_term = K_shear * inner(gam_x, gam_y) * dx
-    return membrane_term + bending_term + shear_term
-
-
-def c_state(x, y):
-    return eta_m * m_state(x, y) + eta_k * k_state(x, y)
-
-
-def Wext(y):
-    v_disp = displacement_3d(y)
-    return dot(v_disp, t_aero) * dx
-
-
-def update_a(u, u_old, v_old, a_old, ufl=True):
+def update_a(u_new, u_prev, v_prev, a_prev, ufl=True):
     if ufl:
         dt_ = dt
         beta_ = beta
     else:
         dt_ = float(dt)
         beta_ = float(beta)
-    return (u - u_old - dt_ * v_old) / beta_ / dt_ ** 2 - (1.0 - 2.0 * beta_) / (
-        2.0 * beta_
-    ) * a_old
+    return (u_new - u_prev - dt_ * v_prev) / beta_ / dt_ ** 2 - (
+        1.0 - 2.0 * beta_
+    ) / (2.0 * beta_) * a_prev
 
 
-def update_v(a, u_old, v_old, a_old, ufl=True):
+def update_v(a_new, u_prev, v_prev, a_prev, ufl=True):
     if ufl:
         dt_ = dt
         gamma_ = gamma
     else:
         dt_ = float(dt)
         gamma_ = float(gamma)
-    return v_old + dt_ * ((1.0 - gamma_) * a_old + gamma_ * a)
+    return v_prev + dt_ * ((1.0 - gamma_) * a_prev + gamma_ * a_new)
 
 
-def update_fields(u, u_old, v_old, a_old):
-    u_vec = u.vector()
-    u0_vec = u_old.vector()
-    v0_vec = v_old.vector()
-    a0_vec = a_old.vector()
+def update_fields(u_fun, u_prev, v_prev, a_prev):
+    u_vec = u_fun.vector()
+    u0_vec = u_prev.vector()
+    v0_vec = v_prev.vector()
+    a0_vec = a_prev.vector()
 
     a_vec = update_a(u_vec, u0_vec, v0_vec, a0_vec, ufl=False)
     v_vec = update_v(a_vec, u0_vec, v0_vec, a0_vec, ufl=False)
 
-    v_old.vector()[:] = v_vec
-    a_old.vector()[:] = a_vec
-    u_old.vector()[:] = u_vec
+    v_prev.vector()[:] = v_vec
+    a_prev.vector()[:] = a_vec
+    u_prev.vector()[:] = u_vec
 
-#relaxation?
+
 def avg(x_old, x_new, alpha):
     return alpha * x_old + (1.0 - alpha) * x_new
 
 
-# CHANGED:
-# Nonlinear residual must be written in terms of the unknown state `q`
-# (not TrialFunction), otherwise `lhs/rhs` extraction fails on nonlinear terms.
-a_new = update_a(q, q_old, v_old, a_old, ufl=True)
-v_new = update_v(a_new, q_old, v_old, a_old, ufl=True)
+a_new = update_a(du, u_old, v_old, a_old, ufl=True)
+v_new = update_v(a_new, u_old, v_old, a_old, ufl=True)
 
 res = (
-    m_state(avg(a_old, a_new, alpha_m), q_test)
-    + c_state(avg(v_old, v_new, alpha_f), q_test)
-    + k_state(avg(q_old, q, alpha_f), q_test)
-    - Wext(q_test)
+    m(avg(a_old, a_new, alpha_m), u_)
+    + c(avg(v_old, v_new, alpha_f), u_)
+    + k(avg(u_old, du, alpha_f), u_)
+    - Wext(u_)
 )
 
-# CHANGED:
-# Build Jacobian explicitly from nonlinear residual.
-jac_form = derivative(res, q, dq_trial)
-
-# CHANGED:
-# Newton settings for nonlinear mixed plate solve.
-newton_abs_tol = 1.0e-6
-newton_rel_tol = 1.0e-6
-newton_inc_tol = 1.0e-8
-newton_max_iters = 35
+a_form = lhs(res)
+L_form = rhs(res)
+K, _ = assemble_system(a_form, L_form, bc)
+solver = LUSolver(K, "mumps")
+solver.parameters["symmetric"] = True
 
 
-def solve_nonlinear_step(q_fun, jac_form, res_form, bcs, ext_force_vec=None):
-    for bc in bcs:
-        bc.apply(q_fun.vector())
-
-    residual_norm0 = None
-    dq_step = Function(V)
-
-    for it in range(newton_max_iters):
-        A = assemble(jac_form)
-        residual_vec = assemble(res_form)
-        if ext_force_vec is not None:
-            residual_vec.axpy(-1.0, ext_force_vec)
-
-        for bc in bcs:
-            bc.apply(A, residual_vec, q_fun.vector())
-        A.ident_zeros()
-
-        residual_norm = residual_vec.norm("l2")
-        if residual_norm0 is None:
-            residual_norm0 = max(residual_norm, 1.0)
-        rel_norm = residual_norm / residual_norm0
-
-        if residual_norm <= newton_abs_tol or rel_norm <= newton_rel_tol:
-            return it, residual_norm, rel_norm
-
-        rhs = residual_vec.copy()
-        rhs *= -1.0
-        try:
-            lin_solver = LUSolver(A, "mumps")
-        except RuntimeError:
-            lin_solver = LUSolver(A, "default")
-        lin_solver.parameters["symmetric"] = False
-        lin_solver.solve(dq_step.vector(), rhs)
-
-        dq_norm = dq_step.vector().norm("l2")
-        q_norm = max(q_fun.vector().norm("l2"), 1.0)
-        inc_rel = dq_norm / q_norm
-
-        q_fun.vector().axpy(1.0, dq_step.vector())
-        for bc in bcs:
-            bc.apply(q_fun.vector())
-
-        if inc_rel <= newton_inc_tol:
-            return it + 1, residual_norm, rel_norm
-
-    raise RuntimeError(
-        f"Newton solve failed after {newton_max_iters} iterations "
-        f"(abs={residual_norm:.3e}, rel={rel_norm:.3e})"
-    )
-
-## Coupling utilities retained from the old file
-## CHANGED:
-## The communication/data-layout logic is mostly preserved, but the geometric
-## queries now operate on midsurface nodes instead of outer solid-surface nodes.
-panel_node_cache = {}
-coupling_node_cache = {}
-max_abs_force_component = 5.0e3
+def local_project(v_expr, Vout, u_out=None):
+    dv = TrialFunction(Vout)
+    v_test = TestFunction(Vout)
+    a_proj = inner(dv, v_test) * dx
+    b_proj = inner(v_expr, v_test) * dx
+    solver_local = LocalSolver(a_proj, b_proj)
+    solver_local.factorize()
+    if u_out is None:
+        u_out = Function(Vout)
+        solver_local.solve_local_rhs(u_out)
+        return u_out
+    solver_local.solve_local_rhs(u_out)
+    return u_out
 
 
 def as_eta_array(values, n):
@@ -386,8 +265,8 @@ def interp_profile(x_src, vals_src, x_dst):
     if len(x_src) == 1:
         return np.repeat(vals_src[:1, :], len(x_dst), axis=0)
     out = np.zeros((len(x_dst), vals_src.shape[1]), dtype=float)
-    for c in range(vals_src.shape[1]):
-        out[:, c] = np.interp(x_dst, x_src, vals_src[:, c])
+    for c_idx in range(vals_src.shape[1]):
+        out[:, c_idx] = np.interp(x_dst, x_src, vals_src[:, c_idx])
     return out
 
 
@@ -432,123 +311,18 @@ def resample_forces_to_shape(
     eta_chord_in = as_eta_array(eta_chord_in, n_chord_in)
 
     grid_span = np.zeros((n_span_out, n_chord_in, 3), dtype=float)
-    for j in range(n_chord_in):
-        grid_span[:, j, :] = interp_profile(
-            eta_span_in, grid_in[:, j, :], eta_span_out
+    for j_idx in range(n_chord_in):
+        grid_span[:, j_idx, :] = interp_profile(
+            eta_span_in, grid_in[:, j_idx, :], eta_span_out
         )
 
     grid_out = np.zeros((n_span_out, n_chord_out, 3), dtype=float)
-    for i in range(n_span_out):
-        grid_out[i, :, :] = interp_profile(
-            eta_chord_in, grid_span[i, :, :], eta_chord_out
+    for i_idx in range(n_span_out):
+        grid_out[i_idx, :, :] = interp_profile(
+            eta_chord_in, grid_span[i_idx, :, :], eta_chord_out
         )
 
     return grid_out.reshape((n_out, 3))
-
-
-def get_scalar_space_coords(space):
-    # Promote 2D FE coordinates to pseudo-3D [x, y, 0] coordinates so existing
-    # coupling code can keep working with 3-component point arrays.
-    scalar_space = space.sub(0).collapse()
-    xy = scalar_space.tabulate_dof_coordinates().reshape((-1, mesh.geometry().dim()))
-    xyz = np.zeros((xy.shape[0], 3), dtype=float)
-    xyz[:, :2] = xy
-    return xyz
-
-
-def get_panel_node_ids(n_span, n_chord, eta_chord):
-    # Panel ownership is now computed on the plate midsurface instead of the
-    # upper/lower airfoil skin nodes used in the 3D solid model.
-    eta_chord = as_eta_array(eta_chord, n_chord)
-    key = (n_span, n_chord, tuple(np.round(eta_chord, 8)))
-    if key in panel_node_cache:
-        return panel_node_cache[key]
-
-    coords_xyz = get_scalar_space_coords(Vt)
-    panel_node_ids = [[] for _ in range(n_span * n_chord)]
-
-    for i_node, X in enumerate(coords_xyz):
-        y_val = X[1]
-        chord = chord_at(y_val)
-        if chord <= 0.0:
-            continue
-        x_le = x_leading_edge_at(y_val)
-        xi = (X[0] - x_le) / max(chord, 1.0e-12)
-        if xi < -0.02 or xi > 1.02:
-            continue
-        eta_s = np.clip(y_val / span, 0.0, 1.0)
-        i_span = min(int(eta_s * n_span), n_span - 1)
-        j_chord = int(np.argmin(np.abs(eta_chord - xi)))
-        panel_idx = i_span * n_chord + j_chord
-        panel_node_ids[panel_idx].append(i_node)
-
-    for i_span in range(n_span):
-        y_target = (i_span + 0.5) * span / n_span
-        chord = chord_at(y_target)
-        x_le = x_leading_edge_at(y_target)
-        for j_chord in range(n_chord):
-            panel_idx = i_span * n_chord + j_chord
-            if panel_node_ids[panel_idx]:
-                continue
-            xi_target = eta_chord[j_chord]
-            x_target = x_le + xi_target * chord
-            distances = np.sum(
-                (coords_xyz[:, :2] - np.array([[x_target, y_target]])) ** 2, axis=1
-            )
-            panel_node_ids[panel_idx].append(int(np.argmin(distances)))
-
-    panel_node_cache[key] = panel_node_ids
-    return panel_node_ids
-
-
-def update_aero_traction(t_aero, forces, n_span, n_chord, eta_chord):
-    # Panel forces are converted directly into midsurface distributed loads.
-    # There is no split across top and bottom wing skins because the structure
-    # is no longer represented with two physical outer surfaces.
-    vec = t_aero.vector()
-    vec.zero()
-
-    dofs_x = Vt.sub(0).dofmap().dofs()
-    dofs_y = Vt.sub(1).dofmap().dofs()
-    dofs_z = Vt.sub(2).dofmap().dofs()
-
-    eta_chord = as_eta_array(eta_chord, n_chord)
-    if n_chord == 1:
-        chord_edges = np.array([0.0, 1.0], dtype=float)
-    else:
-        chord_edges = np.zeros(n_chord + 1, dtype=float)
-        chord_edges[1:-1] = 0.5 * (eta_chord[:-1] + eta_chord[1:])
-        chord_edges[0] = max(0.0, eta_chord[0] - 0.5 * (eta_chord[1] - eta_chord[0]))
-        chord_edges[-1] = min(
-            1.0, eta_chord[-1] + 0.5 * (eta_chord[-1] - eta_chord[-2])
-        )
-        if chord_edges[-1] <= chord_edges[0]:
-            chord_edges = np.linspace(0.0, 1.0, n_chord + 1)
-
-    panel_node_ids = get_panel_node_ids(n_span, n_chord, eta_chord)
-    for panel_idx, ids in enumerate(panel_node_ids):
-        if not ids:
-            continue
-        fx, fy, fz = forces[panel_idx]
-        i_span = panel_idx // n_chord
-        j_chord = panel_idx % n_chord
-
-        y_mid = (i_span + 0.5) * span / n_span
-        c_mid = chord_at(y_mid)
-        d_eta_c = max(chord_edges[j_chord + 1] - chord_edges[j_chord], 1.0e-8)
-        d_span = span / n_span
-        panel_area = max(c_mid * d_eta_c * d_span, 1.0e-10)
-
-        tx = fx / panel_area
-        ty = fy / panel_area
-        tz = fz / panel_area
-        scale = 1.0 / len(ids)
-        for i_node in ids:
-            vec[dofs_x[i_node]] += scale * tx
-            vec[dofs_y[i_node]] += scale * ty
-            vec[dofs_z[i_node]] += scale * tz
-
-    vec.apply("insert")
 
 
 def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_out):
@@ -561,20 +335,18 @@ def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_o
         force_raw = np.asarray(data.get("force", []), dtype=float).reshape(-1, 3)
         indexing = str(data.get("indexing", "span-major"))
         if n_span_in > 0 and n_chord_in > 0 and len(force_raw) == n_span_in * n_chord_in:
-            # Normalize incoming flattening to span-major:
-            # idx = i_span * n_chord + j_chord
             force_grid = np.zeros((n_span_in, n_chord_in, 3), dtype=float)
-            k = 0
+            k_idx = 0
             if indexing == "span-major":
-                for i in range(n_span_in):
-                    for j in range(n_chord_in):
-                        force_grid[i, j, :] = force_raw[k, :]
-                        k += 1
+                for i_idx in range(n_span_in):
+                    for j_idx in range(n_chord_in):
+                        force_grid[i_idx, j_idx, :] = force_raw[k_idx, :]
+                        k_idx += 1
             elif indexing == "chord-major":
-                for j in range(n_chord_in):
-                    for i in range(n_span_in):
-                        force_grid[i, j, :] = force_raw[k, :]
-                        k += 1
+                for j_idx in range(n_chord_in):
+                    for i_idx in range(n_span_in):
+                        force_grid[i_idx, j_idx, :] = force_raw[k_idx, :]
+                        k_idx += 1
             else:
                 raise RuntimeError(f"Unsupported force indexing '{indexing}'")
             force_raw = force_grid.reshape((-1, 3))
@@ -610,44 +382,64 @@ def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_o
 
 
 def get_aero_surface_node_ids():
-    # For the plate model, the aerodynamic interface is identified with the full
-    # midsurface node set.
-    coords_xyz = get_scalar_space_coords(Vt)
-    ids = np.arange(coords_xyz.shape[0], dtype=np.int64)
-    return ids, coords_xyz
+    v_scalar = Vt.sub(0).collapse()
+    coords_v = v_scalar.tabulate_dof_coordinates().reshape((-1, 3))
+    ids = []
+    for i_node, X in enumerate(coords_v):
+        y_val = X[1]
+        chord = chord_at(y_val)
+        if chord <= 0.0:
+            continue
+        x_le = x_leading_edge_at(y_val)
+        xi = (X[0] - x_le) / max(chord, 1.0e-12)
+        if xi < -0.02 or xi > 1.02:
+            continue
+        z_surf = chord * naca_half_thickness(xi)
+        if abs(abs(X[2]) - z_surf) > panel_tol_z:
+            continue
+        ids.append(i_node)
+    return np.asarray(sorted(set(ids)), dtype=np.int64), coords_v
 
 
-def extract_coupling_node_indices(n_span, n_chord, eta_chord, coords_xyz):
-    eta_chord = as_eta_array(eta_chord, n_chord)
-    tree = cKDTree(coords_xyz[:, :2])
-    targets = []
-    for i_span in range(n_span):
-        y_target = eta_span_comm[i_span] * span
-        chord = chord_at(y_target)
-        x_le = x_leading_edge_at(y_target)
-        for j_chord in range(n_chord):
-            xi_target = eta_chord[j_chord]
-            x_target = x_le + xi_target * chord
-            targets.append([x_target, y_target])
-    _, idx = tree.query(np.asarray(targets), k=1)
-    return np.asarray(idx, dtype=np.int64)
+def build_spanwise_targets(eta_span_vals, xi_val, xi_eps=0.0):
+    pts = np.zeros((len(eta_span_vals), 3), dtype=float)
+    xi_eff = float(np.clip(xi_val, 0.0, 1.0))
+    if xi_eff <= 0.0:
+        xi_eff = min(1.0, xi_eff + xi_eps)
+    elif xi_eff >= 1.0:
+        xi_eff = max(0.0, xi_eff - xi_eps)
+    for i_idx, eta_s in enumerate(eta_span_vals):
+        y_val = eta_s * span
+        chord = chord_at(y_val)
+        x_le = x_leading_edge_at(y_val)
+        pts[i_idx, 0] = x_le + xi_eff * chord
+        pts[i_idx, 1] = y_val
+        pts[i_idx, 2] = 0.0
+    return pts
 
 
-def build_coupling_targets(n_span, n_chord, eta_chord):
-    eta_chord = as_eta_array(eta_chord, n_chord)
-    targets = []
-    for i_span in range(n_span):
-        y_target = eta_span_comm[i_span] * span
-        chord = chord_at(y_target)
-        x_le = x_leading_edge_at(y_target)
-        for j_chord in range(n_chord):
-            xi_target = eta_chord[j_chord]
-            x_target = x_le + xi_target * chord
-            targets.append([x_target, y_target, 0.0])
-    return np.asarray(targets, dtype=float)
+def sample_vector_field_at_targets(u_fun, targets_xyz, fallback_tree=None, fallback_vals=None):
+    out = np.zeros((targets_xyz.shape[0], 3), dtype=float)
+    for k_idx in range(targets_xyz.shape[0]):
+        pt = Point(
+            float(targets_xyz[k_idx, 0]),
+            float(targets_xyz[k_idx, 1]),
+            float(targets_xyz[k_idx, 2]),
+        )
+        try:
+            val = u_fun(pt)
+            out[k_idx, 0] = float(val[0])
+            out[k_idx, 1] = float(val[1])
+            out[k_idx, 2] = float(val[2])
+        except RuntimeError:
+            if fallback_tree is None or fallback_vals is None:
+                continue
+            _, idx = fallback_tree.query(targets_xyz[k_idx, :], k=1)
+            out[k_idx, :] = fallback_vals[int(idx), :]
+    return out
 
 
-def build_local_rbf_map(fluid_points, solid_points, epsilon, n_neighbors=1):
+def build_local_rbf_map(fluid_points, solid_points, epsilon, n_neighbors=24):
     fluid_points = np.asarray(fluid_points, dtype=float)
     solid_points = np.asarray(solid_points, dtype=float)
     eps2 = max(float(epsilon) ** 2, 1.0e-16)
@@ -655,29 +447,21 @@ def build_local_rbf_map(fluid_points, solid_points, epsilon, n_neighbors=1):
     k = int(max(1, min(n_neighbors, n_s)))
 
     tree = cKDTree(solid_points)
-    d, idx = tree.query(fluid_points, k=k)
+    dists, idx = tree.query(fluid_points, k=k)
     if k == 1:
-        d = d.reshape(-1, 1)
+        dists = dists.reshape(-1, 1)
         idx = idx.reshape(-1, 1)
+
     nbr_ids = idx.astype(np.int64)
-    r2 = d * d
+    r2 = dists * dists
     nbr_w = np.exp(-r2 / eps2)
     row_sum = np.sum(nbr_w, axis=1, keepdims=True)
     bad = np.where(row_sum[:, 0] <= 1.0e-16)[0]
     for bi in bad:
         nbr_w[bi, :] = 0.0
         nbr_w[bi, 0] = 1.0
-    row_sum = np.maximum(row_sum, 1.0e-16)
-    nbr_w /= row_sum
+    nbr_w /= np.maximum(row_sum, 1.0e-16)
     return nbr_ids, nbr_w
-
-
-def map_displacements_to_fluid(u_nodes, nbr_ids, nbr_w):
-    n_f, k = nbr_ids.shape
-    out = np.zeros((n_f, 3), dtype=float)
-    for q_idx in range(k):
-        out += nbr_w[:, q_idx : q_idx + 1] * u_nodes[nbr_ids[:, q_idx], :]
-    return out
 
 
 def map_forces_to_solid(f_fluid, n_solid_nodes, nbr_ids, nbr_w):
@@ -704,88 +488,27 @@ def apply_Tf_operator(Fa, n_solid_nodes, nbr_ids, nbr_w, A_diag, S_lumped):
     return Fs_coeff, rhs
 
 
-def get_nodal_displacements(q_fun, node_ids, dofs_x, dofs_y, dofs_w):
-    q_arr = q_fun.vector().get_local()
-    out = np.zeros((len(node_ids), 3), dtype=float)
-    out[:, 0] = q_arr[dofs_x[node_ids]]
-    out[:, 1] = q_arr[dofs_y[node_ids]]
-    out[:, 2] = q_arr[dofs_w[node_ids]]
-    return out
-
-
-def get_nodal_rotations(q_fun, node_ids, dofs_tx, dofs_ty):
-    q_arr = q_fun.vector().get_local()
-    out = np.zeros((len(node_ids), 3), dtype=float)
-    out[:, 0] = q_arr[dofs_tx[node_ids]]
-    out[:, 1] = q_arr[dofs_ty[node_ids]]
-    out[:, 2] = 0.0
-    return out
-
-
-def add_nodal_forces_to_rhs(rhs_vec, nodal_forces, node_ids, dofs_x, dofs_y, dofs_w):
+def add_nodal_forces_to_rhs(rhs_vec, nodal_forces, node_ids, dofs_x, dofs_y, dofs_z):
     arr = rhs_vec.get_local()
     arr[dofs_x[node_ids]] += nodal_forces[:, 0]
     arr[dofs_y[node_ids]] += nodal_forces[:, 1]
-    arr[dofs_w[node_ids]] += nodal_forces[:, 2]
+    arr[dofs_z[node_ids]] += nodal_forces[:, 2]
     rhs_vec.set_local(arr)
     rhs_vec.apply("insert")
 
 
-def local_project(v, Vout, u=None):
-    dv = TrialFunction(Vout)
-    v_ = TestFunction(Vout)
-    a_proj = inner(dv, v_) * dx
-    b_proj = inner(v, v_) * dx
-    solver = LocalSolver(a_proj, b_proj)
-    solver.factorize()
-    if u is None:
-        u = Function(Vout)
-        solver.solve_local_rhs(u)
-        return u
-    solver.solve_local_rhs(u)
-    return u
-
-
-def build_output_displacement(q_fun, out_fun):
-    # Export a 3D displacement field assembled from plate variables so ParaView
-    # and the fluid coupling still see a familiar vector displacement output.
-    out_fun.assign(project(displacement_3d(q_fun), Vt))
-
-
-def edge_expand_from_cp(flat_cp, n_span, n_chord, eta_chord, eta_query):
-    # Build an edge-displacement payload with the same flattened shape as the
-    # CP payload, so downstream decoders can keep using (n_span, n_chord).
-    arr = np.asarray(flat_cp, dtype=float).reshape((n_span, n_chord, 3))
-    eta = as_eta_array(eta_chord, n_chord)
-    out = np.zeros((n_span, n_chord, 3), dtype=float)
-    q = float(np.clip(eta_query, 0.0, 1.0))
-    for i_span in range(n_span):
-        row = arr[i_span, :, :]
-        edge = interp_profile(eta, row, np.array([q], dtype=float))[0, :]
-        out[i_span, :, :] = edge
-    return out.reshape((n_span * n_chord, 3))
-
-
-def evaluate_field_at_targets(u_fun, targets_xyz):
-    out = np.zeros((targets_xyz.shape[0], 3), dtype=float)
-    for k in range(targets_xyz.shape[0]):
-        x = float(targets_xyz[k, 0])
-        y = float(targets_xyz[k, 1])
-        try:
-            uv = u_fun(x, y)
-            out[k, 0] = float(uv[0])
-            out[k, 1] = float(uv[1])
-            out[k, 2] = float(uv[2])
-        except RuntimeError:
-            # Fallback to nearest-vertex sample if point evaluation fails near boundary.
-            out[k, :] = 0.0
+def get_nodal_displacements(u_fun, node_ids, dofs_x, dofs_y, dofs_z):
+    u_arr = u_fun.vector().get_local()
+    out = np.zeros((len(node_ids), 3), dtype=float)
+    out[:, 0] = u_arr[dofs_x[node_ids]]
+    out[:, 1] = u_arr[dofs_y[node_ids]]
+    out[:, 2] = u_arr[dofs_z[node_ids]]
     return out
 
 
-sig = Function(Vsig, name="MembraneStress")
-u_vis = Function(Vt, name="Displacement")
+sig = Function(Vsig, name="CauchyStress")
 
-out_dir = "../results/v12_v8_chordBC/"
+out_dir = os.path.join("..", "results", "v13_linear_edge_coupled")
 os.makedirs(out_dir, exist_ok=True)
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
 xdmf_file = XDMFFile(xdmf_path)
@@ -793,13 +516,9 @@ xdmf_file.parameters["flush_output"] = True
 xdmf_file.parameters["functions_share_mesh"] = True
 xdmf_file.parameters["rewrite_function_mesh"] = False
 
-# VTK/PVD exports for ParaView workflows
-# - solid_mesh.pvd: undeformed reference mesh
-# - solid_displacement.pvd: time-varying displacement field on mesh
-# - solid_membrane_stress.pvd: time-varying membrane stress field on mesh
 mesh_pvd_path = os.path.join(out_dir, "solid_mesh.pvd")
 u_pvd_path = os.path.join(out_dir, "solid_displacement.pvd")
-sig_pvd_path = os.path.join(out_dir, "solid_membrane_stress.pvd")
+sig_pvd_path = os.path.join(out_dir, "solid_stress.pvd")
 mesh_pvd = File(mesh_pvd_path)
 u_pvd = File(u_pvd_path)
 sig_pvd = File(sig_pvd_path)
@@ -807,151 +526,127 @@ mesh_pvd << mesh
 
 print("Connecting solid to coupling server...")
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect(("127.0.0.1", 9000))
+sock.connect(
+    (
+        os.getenv("COUPLING_HOST", "127.0.0.1"),
+        int(os.getenv("COUPLING_PORT", "9000")),
+    )
+)
 sock_file = sock.makefile("r")
 sock.sendall((json.dumps({"role": "solid"}) + "\n").encode())
 print("Solid connected.")
 
-print("Building interface node sets...")
-aero_node_ids, outer_surface_coords = get_aero_surface_node_ids()
-cp_node_ids = extract_coupling_node_indices(
-    n_span, n_chord, eta_chord_comm, outer_surface_coords
-)
-cp_nodes = outer_surface_coords[cp_node_ids, :]
+print("Building interface sets and communication targets...")
+aero_node_ids, aero_coords = get_aero_surface_node_ids()
+interface_node_ids = aero_node_ids
+interface_coords = aero_coords[interface_node_ids, :]
+interface_tree = cKDTree(interface_coords)
+
+cp_targets = build_spanwise_targets(eta_span_comm, eta_cp, xi_eps=0.0)
+le_targets = build_spanwise_targets(eta_span_comm, 0.0, xi_eps=edge_eval_xi_eps)
+te_targets = build_spanwise_targets(eta_span_comm, 1.0, xi_eps=edge_eval_xi_eps)
+
 np.savetxt(
-    os.path.join(out_dir, "coupling_nodes.csv"),
-    cp_nodes,
+    os.path.join(out_dir, "coupling_cp_targets.csv"),
+    cp_targets,
     delimiter=",",
     header="x,y,z",
     comments="",
 )
-print(f"Interface nodes ready: aero={len(aero_node_ids)}, coupling={len(cp_node_ids)}")
-
-coupling_targets = build_coupling_targets(n_span, n_chord, eta_chord_comm)
-target_vs_nearest_csv = os.path.join(out_dir, "coupling_target_vs_nearest.csv")
-with open(target_vs_nearest_csv, "w") as fp:
-    fp.write("index,i_span,j_chord,x_target,y_target,z_target,x_cp,y_cp,z_cp,dist\n")
-    for k in range(coupling_targets.shape[0]):
-        i_span = k // n_chord
-        j_chord = k % n_chord
-        tgt = coupling_targets[k, :]
-        cp = cp_nodes[k, :]
-        d = float(np.linalg.norm(tgt - cp))
-        fp.write(
-            f"{k},{i_span},{j_chord},"
-            f"{tgt[0]:.12e},{tgt[1]:.12e},{tgt[2]:.12e},"
-            f"{cp[0]:.12e},{cp[1]:.12e},{cp[2]:.12e},{d:.12e}\n"
-        )
-if DEBUG_IO:
-    print(f"SOLID CP first target={coupling_targets[0].tolist()} nearest={cp_nodes[0].tolist()}")
-    print(f"SOLID CP last  target={coupling_targets[-1].tolist()} nearest={cp_nodes[-1].tolist()}")
-    print(f"Saved target-vs-nearest diagnostics: {target_vs_nearest_csv}")
-
-# Conservative transfer is still used, but now between fluid control points and
-# plate midsurface nodes rather than solid boundary nodes.
-interface_node_ids = aero_node_ids
-interface_coords = outer_surface_coords[interface_node_ids, :]
-print("Building local RBF transfer map...")
-nbr_ids, nbr_w = build_local_rbf_map(cp_nodes, interface_coords, rbf_epsilon, n_neighbors=4)
-print(
-    f"Conservative mapping: {cp_nodes.shape[0]} fluid points <- "
-    f"{interface_coords.shape[0]} solid interface nodes"
+np.savetxt(
+    os.path.join(out_dir, "coupling_le_targets.csv"),
+    le_targets,
+    delimiter=",",
+    header="x,y,z",
+    comments="",
+)
+np.savetxt(
+    os.path.join(out_dir, "coupling_te_targets.csv"),
+    te_targets,
+    delimiter=",",
+    header="x,y,z",
+    comments="",
 )
 
-A_diag = np.ones((cp_nodes.shape[0],), dtype=float)
+nbr_ids, nbr_w = build_local_rbf_map(
+    cp_targets, interface_coords, rbf_epsilon, n_neighbors=rbf_neighbors
+)
+A_diag = np.ones((cp_targets.shape[0],), dtype=float)
 S_lumped = compute_S_lumped(len(interface_node_ids), nbr_ids, nbr_w, A_diag)
+
 print(
-    f"Operator setup: A=I ({len(A_diag)} dofs), "
-    f"S_lumped min/max = {S_lumped.min():.3e}/{S_lumped.max():.3e}"
+    f"Interface ready: surface_nodes={len(interface_node_ids)}, "
+    f"cp_stations={len(cp_targets)}, RBF neighbors={nbr_ids.shape[1]}"
 )
 
-dofs_u_x = np.asarray(V.sub(0).sub(0).dofmap().dofs(), dtype=np.int64)
-dofs_u_y = np.asarray(V.sub(0).sub(1).dofmap().dofs(), dtype=np.int64)
-dofs_w = np.asarray(V.sub(1).dofmap().dofs(), dtype=np.int64)
-dofs_theta_x = np.asarray(V.sub(2).sub(0).dofmap().dofs(), dtype=np.int64)
-dofs_theta_y = np.asarray(V.sub(2).sub(1).dofmap().dofs(), dtype=np.int64)
+dofs_x = np.asarray(V.sub(0).dofmap().dofs(), dtype=np.int64)
+dofs_y = np.asarray(V.sub(1).dofmap().dofs(), dtype=np.int64)
+dofs_z = np.asarray(V.sub(2).dofmap().dofs(), dtype=np.int64)
 
-if work_conservative_mode:
-    t_aero.vector().zero()
-    t_aero.vector().apply("insert")
-
-u_cp0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
-u_le0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
-u_te0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
-if DEBUG_IO:
-    print(f"SEND init first point = {u_cp0[0]}")
-    print(f"SEND init last point  = {u_cp0[-1]}")
-sock.sendall(
-    (
-        json.dumps(
-            {
-                "step": 0,
-                "dt": dt_value,
-                "ttot": T,
-                "nsteps": Nsteps,
-                "n_span": n_span,
-                "n_chord": n_chord,
-                "indexing": "span-major",
-                "eta_span": eta_span_comm.tolist(),
-                "eta_chord": eta_chord_comm.tolist(),
-                "geometry": u_cp0,
-                "geometry_le": u_le0,
-                "geometry_te": u_te0,
-                "rotation": u_cp0,
-                "rotation_le": u_le0,
-                "rotation_te": u_te0,
-            }
-        )
-        + "\n"
-    ).encode()
-)
-print("Initial geometry sent.")
+ext_force_vec_template = u.vector().copy()
+ext_force_vec_template.zero()
 
 time = np.linspace(0.0, T, Nsteps + 1)
-u_tip = np.zeros((Nsteps + 1,))
-energies = np.zeros((Nsteps + 1, 4))
+u_tip = np.zeros((Nsteps + 1,), dtype=float)
+energies = np.zeros((Nsteps + 1, 4), dtype=float)
 E_damp_acc = 0.0
-force_relax = 1.0 if work_conservative_mode else 0.20
+force_relax = 1.0
 forces_prev = None
 work_rel_errors = np.full((Nsteps,), np.nan, dtype=float)
 work_Wf = np.full((Nsteps,), np.nan, dtype=float)
 work_Ws = np.full((Nsteps,), np.nan, dtype=float)
-newton_iter_hist = np.full((Nsteps,), np.nan, dtype=float)
-newton_abs_hist = np.full((Nsteps,), np.nan, dtype=float)
-newton_rel_hist = np.full((Nsteps,), np.nan, dtype=float)
-ext_force_vec_template = q.vector().copy()
-ext_force_vec_template.zero()
 
-tip_x = x_leading_edge_at(span) + 0.75 * chord_at(span)
+tip_x = x_leading_edge_at(span) + eta_cp * chord_at(span)
 tip_y = span - 1.0e-8
+tip_z = 0.0
 
-# Save initial (t=0) fields in both XDMF and VTK/PVD.
-build_output_displacement(q, u_vis)
-q_mem0, _q_w0, _q_theta0 = q.split(deepcopy=True)
-local_project(membrane_stress(q_mem0), Vsig, sig)
-xdmf_file.write(u_vis, 0.0)
+zero_payload = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
+init_msg = {
+    "step": 0,
+    "dt": dt_value,
+    "ttot": T,
+    "nsteps": Nsteps,
+    "n_span": n_span_comm,
+    "n_chord": n_chord_comm,
+    "indexing": "span-major",
+    "eta_span": eta_span_comm.tolist(),
+    "eta_chord": eta_cp_comm.tolist(),
+    "geometry": zero_payload,
+    "geometry_le": zero_payload,
+    "geometry_te": zero_payload,
+    "rotation": zero_payload,
+    "rotation_le": zero_payload,
+    "rotation_te": zero_payload,
+}
+sock.sendall((json.dumps(init_msg) + "\n").encode())
+print("Initial zero geometry sent.")
+
+xdmf_file.write(u, 0.0)
+local_project(sigma(u), Vsig, sig)
 xdmf_file.write(sig, 0.0)
-u_pvd << (u_vis, 0.0)
+u_pvd << (u, 0.0)
 sig_pvd << (sig, 0.0)
 
-for i in range(Nsteps):
-    print(f"Solid step {i + 1}/{Nsteps}: waiting for force...")
+for i_step in range(Nsteps):
+    print(f"Solid step {i_step + 1}/{Nsteps}: waiting for force...")
     line = sock_file.readline()
     if line == "":
         raise RuntimeError("Coupling server disconnected while sending force data")
 
     data = json.loads(line)
-    forces, used_2d_force = parse_force_payload(
-        data, n_span, n_chord, eta_span_comm, eta_chord_comm
+    forces, used_structured_force = parse_force_payload(
+        data, n_span_comm, n_chord_comm, eta_span_comm, eta_cp_comm
     )
     if not np.isfinite(forces).all():
-        raise RuntimeError(f"Non-finite force data at solid step {i + 1}")
+        raise RuntimeError(f"Non-finite force data at solid step {i_step + 1}")
 
-    if i == 0:
-        if used_2d_force:
-            print(f"Solid: received 2D force payload ({n_span}x{n_chord})")
+    if i_step == 0:
+        if used_structured_force:
+            print(
+                f"Solid: received structured force payload ({n_span_comm}x{n_chord_comm})"
+            )
         else:
-            print("Solid: received legacy spanwise force payload and remapped to 2D grid")
+            print("Solid: received legacy force payload and resampled to coupling stations")
 
     if forces_prev is None:
         forces_eff = forces.copy()
@@ -966,121 +661,110 @@ for i in range(Nsteps):
             forces_eff, len(interface_node_ids), nbr_ids, nbr_w, A_diag, S_lumped
         )
         if not np.isfinite(nodal_forces).all():
-            raise RuntimeError(f"Non-finite mapped nodal forces at solid step {i + 1}")
+            raise RuntimeError(f"Non-finite mapped nodal forces at solid step {i_step + 1}")
 
-        u_nodes_prev = get_nodal_displacements(
-            q_old, interface_node_ids, dofs_u_x, dofs_u_y, dofs_w
-        )
-        u_cp_prev = map_displacements_to_fluid(u_nodes_prev, nbr_ids, nbr_w)
-        Wf = float(np.sum(u_cp_prev * (forces_eff * A_diag[:, None])))
-        Ws = float(np.sum(u_nodes_prev * (Fs_coeff * S_lumped[:, None])))
-        rel_work_err = abs(Wf - Ws) / max(abs(Wf), abs(Ws), 1.0e-16)
-        work_rel_errors[i] = rel_work_err
-        work_Wf[i] = Wf
-        work_Ws[i] = Ws
-        if i == 0 or (i + 1) % 20 == 0:
-            print(
-                f"Work audit step {i + 1}: "
-                f"Wf={Wf:.6e}, Ws={Ws:.6e}, rel_err={rel_work_err:.3e}"
-            )
-    else:
-        update_aero_traction(t_aero, forces_eff, n_span, n_chord, eta_chord_comm)
-
-    # CHANGED:
-    # Solve mixed plate step with Newton on the nonlinear residual.
-    ext_force_vec = None
-    if work_conservative_mode and nodal_forces is not None:
+    b = assemble(L_form)
+    if nodal_forces is not None:
         ext_force_vec = ext_force_vec_template.copy()
         ext_force_vec.zero()
         add_nodal_forces_to_rhs(
-            ext_force_vec, nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, dofs_w
+            ext_force_vec, nodal_forces, interface_node_ids, dofs_x, dofs_y, dofs_z
         )
-    try:
-        n_it, abs_res, rel_res = solve_nonlinear_step(
-            q, jac_form, res, bcs, ext_force_vec=ext_force_vec
+        b.axpy(1.0, ext_force_vec)
+    bc.apply(b)
+    solver.solve(u.vector(), b)
+
+    if work_conservative_mode and nodal_forces is not None and Fs_coeff is not None:
+        interface_disp_prev = get_nodal_displacements(
+            u_old, interface_node_ids, dofs_x, dofs_y, dofs_z
         )
-    except RuntimeError as err:
-        raise RuntimeError(f"Nonlinear plate solve failed at step {i + 1}/{Nsteps}: {err}")
-    newton_iter_hist[i] = float(n_it)
-    newton_abs_hist[i] = float(abs_res)
-    newton_rel_hist[i] = float(rel_res)
-
-    if i == 0 or (i + 1) % 20 == 0:
-        print(
-            f"Solid step {i + 1}/{Nsteps}: Newton converged in {n_it} iterations "
-            f"(abs={abs_res:.3e}, rel={rel_res:.3e})"
+        u_cp_prev = sample_vector_field_at_targets(
+            u_old,
+            cp_targets,
+            fallback_tree=interface_tree,
+            fallback_vals=interface_disp_prev,
         )
+        Wf = float(np.sum(u_cp_prev * (forces_eff * A_diag[:, None])))
+        Ws = float(np.sum(interface_disp_prev * (Fs_coeff * S_lumped[:, None])))
+        rel_work_err = abs(Wf - Ws) / max(abs(Wf), abs(Ws), 1.0e-16)
+        work_rel_errors[i_step] = rel_work_err
+        work_Wf[i_step] = Wf
+        work_Ws[i_step] = Ws
+        if i_step == 0 or (i_step + 1) % 20 == 0:
+            print(
+                f"Work audit step {i_step + 1}: "
+                f"Wf={Wf:.6e}, Ws={Ws:.6e}, rel_err={rel_work_err:.3e}"
+            )
 
-    update_fields(q, q_old, v_old, a_old)
-    t = time[i + 1]
+    update_fields(u, u_old, v_old, a_old)
+    t = time[i_step + 1]
 
-    build_output_displacement(q, u_vis)
-    xdmf_file.write(u_vis, t)
-    u_pvd << (u_vis, float(t))
-
-    # Stress output is now membrane stress on the plate midsurface rather than a
-    # full 3D Cauchy stress tensor through the solid wing volume.
-    q_mem, _q_w, _q_theta = q.split(deepcopy=True)
-    local_project(membrane_stress(q_mem), Vsig, sig)
+    xdmf_file.write(u, t)
+    u_pvd << (u, float(t))
+    local_project(sigma(u), Vsig, sig)
     xdmf_file.write(sig, t)
     sig_pvd << (sig, float(t))
 
-    E_elas = 0.5 * assemble(k_state(q_old, q_old))
-    E_kin = 0.5 * assemble(m_state(v_old, v_old))
-    E_damp_acc += dt_value * assemble(c_state(v_old, v_old))
+    E_elas = 0.5 * assemble(k(u_old, u_old))
+    E_kin = 0.5 * assemble(m(v_old, v_old))
+    E_damp_acc += dt_value * assemble(c(v_old, v_old))
     E_tot = E_elas + E_kin + E_damp_acc
-    energies[i + 1, :] = np.array([E_elas, E_kin, E_damp_acc, E_tot])
+    energies[i_step + 1, :] = np.array([E_elas, E_kin, E_damp_acc, E_tot])
 
     try:
-        u_tip[i + 1] = q(tip_x, tip_y)[2]
+        u_tip[i_step + 1] = u(Point(tip_x, tip_y, tip_z))[2]
     except RuntimeError:
-        u_tip[i + 1] = q(tip_x, span - 1.0e-4)[2]
+        u_tip[i_step + 1] = 0.0
 
-    if i < Nsteps - 1:
-        u_nodes = get_nodal_displacements(q, interface_node_ids, dofs_u_x, dofs_u_y, dofs_w)
-        u_cp_arr = map_displacements_to_fluid(u_nodes, nbr_ids, nbr_w)
-        rot_nodes = get_nodal_rotations(q, interface_node_ids, dofs_theta_x, dofs_theta_y)
-        rot_cp_arr = map_displacements_to_fluid(rot_nodes, nbr_ids, nbr_w)
-        if USE_DIRECT_TARGET_EVAL:
-            u_cp_eval = evaluate_field_at_targets(u_vis, coupling_targets)
-            if DEBUG_IO and (i == 0 or (i + 1) % 20 == 0):
-                diff = u_cp_eval - u_cp_arr
-                rel = np.linalg.norm(diff) / max(np.linalg.norm(u_cp_eval), 1.0e-16)
-                print(
-                    f"GEOM MAP compare step {i+1}: ||eval-rbf||={np.linalg.norm(diff):.3e}, rel={rel:.3e}"
-                )
-            u_cp_arr = u_cp_eval
-        if ZERO_GEOMETRY_TEST:
-            u_cp_arr = np.zeros_like(u_cp_arr)
-            rot_cp_arr = np.zeros_like(rot_cp_arr)
-        if DEBUG_IO and (i == 0 or (i + 1) % 20 == 0):
-            print(f"SEND step {i+1} first point = {u_cp_arr[0, :].tolist()}")
-            print(f"SEND step {i+1} last point  = {u_cp_arr[-1, :].tolist()}")
-        u_le_arr = edge_expand_from_cp(u_cp_arr, n_span, n_chord, eta_chord_comm, 0.0)
-        u_te_arr = edge_expand_from_cp(u_cp_arr, n_span, n_chord, eta_chord_comm, 1.0)
-        rot_le_arr = edge_expand_from_cp(rot_cp_arr, n_span, n_chord, eta_chord_comm, 0.0)
-        rot_te_arr = edge_expand_from_cp(rot_cp_arr, n_span, n_chord, eta_chord_comm, 1.0)
+    if i_step < Nsteps - 1:
+        interface_disp_cur = get_nodal_displacements(
+            u, interface_node_ids, dofs_x, dofs_y, dofs_z
+        )
+        u_cp_arr = sample_vector_field_at_targets(
+            u,
+            cp_targets,
+            fallback_tree=interface_tree,
+            fallback_vals=interface_disp_cur,
+        )
+        u_le_arr = sample_vector_field_at_targets(
+            u,
+            le_targets,
+            fallback_tree=interface_tree,
+            fallback_vals=interface_disp_cur,
+        )
+        u_te_arr = sample_vector_field_at_targets(
+            u,
+            te_targets,
+            fallback_tree=interface_tree,
+            fallback_vals=interface_disp_cur,
+        )
+        zero_rot = np.zeros_like(u_cp_arr)
+
+        if DEBUG_IO and (i_step == 0 or (i_step + 1) % 20 == 0):
+            print(f"SEND step {i_step + 1} first LE/TE = {u_le_arr[0, :].tolist()} / {u_te_arr[0, :].tolist()}")
+            print(f"SEND step {i_step + 1} last  LE/TE = {u_le_arr[-1, :].tolist()} / {u_te_arr[-1, :].tolist()}")
+
         msg_geo = json.dumps(
             {
-                "step": i + 1,
+                "step": i_step + 1,
                 "dt": dt_value,
                 "ttot": T,
                 "nsteps": Nsteps,
-                "n_span": n_span,
-                "n_chord": n_chord,
+                "n_span": n_span_comm,
+                "n_chord": n_chord_comm,
                 "indexing": "span-major",
                 "eta_span": eta_span_comm.tolist(),
-                "eta_chord": eta_chord_comm.tolist(),
+                "eta_chord": eta_cp_comm.tolist(),
                 "geometry": u_cp_arr.tolist(),
                 "geometry_le": u_le_arr.tolist(),
                 "geometry_te": u_te_arr.tolist(),
-                "rotation": rot_cp_arr.tolist(),
-                "rotation_le": rot_le_arr.tolist(),
-                "rotation_te": rot_te_arr.tolist(),
+                "rotation": zero_rot.tolist(),
+                "rotation_le": zero_rot.tolist(),
+                "rotation_te": zero_rot.tolist(),
             }
         )
         sock.sendall((msg_geo + "\n").encode())
-        print(f"Solid step {i + 1}/{Nsteps}: geometry sent.")
+        print(f"Solid step {i_step + 1}/{Nsteps}: geometry sent.")
 
 sock_file.close()
 sock.close()
@@ -1088,74 +772,15 @@ print("Solid solver finished.")
 print(f"Solid field outputs: {xdmf_path}")
 print(f"Solid VTK outputs: {u_pvd_path}, {sig_pvd_path}, {mesh_pvd_path}")
 
-diag_csv = os.path.join(out_dir, "solid_v12_diagnostics.csv")
+diag_csv = os.path.join(out_dir, "solid_v13_diagnostics.csv")
 with open(diag_csv, "w") as fp:
-    fp.write("step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error,newton_iters,newton_abs,newton_rel\n")
-    for k in range(Nsteps):
+    fp.write("step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error\n")
+    for k_idx in range(Nsteps):
         fp.write(
-            f"{k+1},{time[k+1]:.12e},{u_tip[k+1]:.12e},"
-            f"{energies[k+1,0]:.12e},{energies[k+1,1]:.12e},{energies[k+1,2]:.12e},{energies[k+1,3]:.12e},"
-            f"{work_Wf[k]:.12e},{work_Ws[k]:.12e},{work_rel_errors[k]:.12e},"
-            f"{newton_iter_hist[k]:.12e},{newton_abs_hist[k]:.12e},{newton_rel_hist[k]:.12e}\n"
+            f"{k_idx + 1},{time[k_idx + 1]:.12e},{u_tip[k_idx + 1]:.12e},"
+            f"{energies[k_idx + 1, 0]:.12e},{energies[k_idx + 1, 1]:.12e},"
+            f"{energies[k_idx + 1, 2]:.12e},{energies[k_idx + 1, 3]:.12e},"
+            f"{work_Wf[k_idx]:.12e},{work_Ws[k_idx]:.12e},{work_rel_errors[k_idx]:.12e}\n"
         )
-print(f"Saved diagnostics: {diag_csv}")
 
-
-# This diagnostic measures how close the Reissner-Mindlin solution is to the
-# Kirchhoff-Love thin-plate constraint theta = grad(w).
-_u_final, w_final, theta_final = q.split(deepcopy=True)
-kl_gap_vec = kirchhoff_love_theta(w_final) - theta_final
-kl_rotation_gap = project(
-    sqrt(dot(kl_gap_vec, kl_gap_vec)),
-    FunctionSpace(mesh, "CG", 1),
-)
-print(
-    "Final Kirchhoff-Love compatibility diagnostic "
-    f"(||grad(w)-theta||_L2) = {norm(kl_rotation_gap, 'l2'):.6e}"
-)
-
-if work_conservative_mode:
-    valid = np.isfinite(work_rel_errors)
-    if np.any(valid):
-        errs = work_rel_errors[valid]
-        final_err = float(errs[-1])
-        max_err = float(np.max(errs))
-        mean_err = float(np.mean(errs))
-        w_tail = min(work_conv_window, len(errs))
-        tail = errs[-w_tail:]
-        tail_max = float(np.max(tail))
-        tail_mean = float(np.mean(tail))
-        conserved = tail_max <= work_rel_tol
-        print(
-            "Work conservation summary: "
-            f"final={final_err:.3e}, mean={mean_err:.3e}, max={max_err:.3e}, "
-            f"tail({w_tail}) mean={tail_mean:.3e}, tail({w_tail}) max={tail_max:.3e}, "
-            f"tol={work_rel_tol:.1e}"
-        )
-        if conserved:
-            print(f"Work conservation converged over last {w_tail} steps.")
-        else:
-            print(
-                f"WARNING: Work conservation NOT converged over last {w_tail} steps "
-                f"(tail max {tail_max:.3e} > tol {work_rel_tol:.1e})."
-            )
-    else:
-        print("WARNING: No valid work-audit samples were collected.")
-
-plt.figure()
-plt.plot(time, u_tip)
-plt.xlabel("Time")
-plt.ylabel("Tip displacement")
-tip_plot = os.path.join(out_dir, "tip_displacement.png")
-plt.savefig(tip_plot, dpi=150)
-plt.close()
-
-plt.figure()
-plt.plot(time, energies)
-plt.legend(("elastic", "kinetic", "damping", "total"))
-plt.xlabel("Time")
-plt.ylabel("Energy")
-energy_plot = os.path.join(out_dir, "energies.png")
-plt.savefig(energy_plot, dpi=150)
-plt.close()
-print(f"Saved plots: {tip_plot}, {energy_plot}")
+print(f"Diagnostics: {diag_csv}")
