@@ -73,7 +73,7 @@ rho = parse(Float64, get(ENV, "FLUID_RHO", "1.0"))
 DEBUG_IO = lowercase(get(ENV, "COUPLING_DEBUG_IO", "0")) ∉ ("0", "false", "no")
 
 # Match solid coordinate system: x=chord, y=span, z=normal displacement.
-span = parse(Float64, get(ENV, "WING_SPAN", "1.0"))
+span = parse(Float64, get(ENV, "WING_SPAN", "0.8"))
 root_chord = parse(Float64, get(ENV, "WING_ROOT_CHORD", "0.12"))
 tip_chord = parse(Float64, get(ENV, "WING_TIP_CHORD", "0.12"))
 leading_edge_sweep = parse(Float64, get(ENV, "WING_X_TIP", "0.0"))
@@ -85,10 +85,12 @@ twist_root = 0.0
 twist_tip = 0.0
 gamma = 0.0
 
-n_span = parse(Int, get(ENV, "FLUID_N_SPAN", "80"))
+# Keep fluid spanwise discretization aligned with coupling payload by default.
+comm_n_span = parse(Int, get(ENV, "COUPLING_NSPAN_COMM", "80"))
+n_span = parse(Int, get(ENV, "FLUID_N_SPAN", string(comm_n_span)))
 
 ttot = parse(Float64, get(ENV, "COUPLING_TTOT", "4.0"))
-nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "200"))
+nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "400"))
 dt = ttot / nsteps
 
 p_per_step = parse(Int, get(ENV, "FLUID_P_PER_STEP", "2"))
@@ -106,6 +108,10 @@ force_relax = parse(Float64, get(ENV, "FLUID_FORCE_RELAX", "1.0"))
 disp_scale_x = parse(Float64, get(ENV, "FLUID_DISP_SCALE_X", "1.0"))
 disp_scale_y = parse(Float64, get(ENV, "FLUID_DISP_SCALE_Y", "1.0"))
 disp_scale_z = parse(Float64, get(ENV, "FLUID_DISP_SCALE_Z", "1.0"))
+wake_remove_every = parse(Int, get(ENV, "FLUID_WAKE_REMOVE_EVERY", "20"))
+wake_sphere_factor = parse(Float64, get(ENV, "FLUID_WAKE_SPHERE_FACTOR", "30.0"))
+wake_strength_max_factor = parse(Float64, get(ENV, "FLUID_WAKE_STRENGTH_MAX_FACTOR", "0.25"))
+wake_sigma_max_factor = parse(Float64, get(ENV, "FLUID_WAKE_SIGMA_MAX_FACTOR", "8.0"))
 
 # Spanwise-only fluid discretization, CP/BV sampled internally from LE/TE.
 eta_cp = 0.75
@@ -151,7 +157,8 @@ simulation = uns.Simulation(
     Vinit=zeros(3), Winit=zeros(3)
 )
 
-save_path = normpath(joinpath(@__DIR__, "..", "results", "fluid", "v9"))
+repo_root = normpath(joinpath(@__DIR__, ".."))
+save_path = normpath(joinpath(repo_root, "results", "fluid", "v9"))
 run_name = "fluid_v9"
 mkpath(save_path)
 
@@ -159,18 +166,18 @@ max_particles = Int((nsteps + 1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step 
 omit_shedding_rows = Int[]
 
 rmv_strength = 2 * 2 / max(p_per_step, 1) * dt / (1 / 12)
-minmaxGamma = rmv_strength .* [0.0001, 0.15]
+minmaxGamma = rmv_strength .* [0.0001, wake_strength_max_factor]
 wake_treatment_strength = uns.remove_particles_strength(
-    minmaxGamma[1]^2, minmaxGamma[2]^2; every_nsteps=5
+    minmaxGamma[1]^2, minmaxGamma[2]^2; every_nsteps=max(wake_remove_every, 1)
 )
 
-minmaxsigma = sigma_vpm_overwrite .* [0.1, 6.0]
+minmaxsigma = sigma_vpm_overwrite .* [0.1, wake_sigma_max_factor]
 wake_treatment_sigma = uns.remove_particles_sigma(
-    minmaxsigma[1], minmaxsigma[2]; every_nsteps=5
+    minmaxsigma[1], minmaxsigma[2]; every_nsteps=max(wake_remove_every, 1)
 )
 
 wake_treatment_sphere = uns.remove_particles_sphere(
-    (3.0 * b)^2, 1; Xoff=[0.5 * b, 0.0, 0.0]
+    (wake_sphere_factor * b)^2, 1; Xoff=[0.5 * b, 0.0, 0.0]
 )
 
 wake_treatment = uns.concatenate(
@@ -193,7 +200,11 @@ vpm_fmm_settings = vpm.FMM(
     min_ncrit=3
 )
 
-println("Shedding config v9: spanwise-only wing, omit_shedding rows=$(length(omit_shedding_rows))")
+println(
+    "Shedding config v9: spanwise-only wing, n_span=$(n_span), " *
+    "omit_shedding rows=$(length(omit_shedding_rows)), wake_sphere_factor=$(wake_sphere_factor), " *
+    "wake_remove_every=$(wake_remove_every)"
+)
 
 
 # ---------------------------- COUPLING HELPERS ------------------------------
@@ -562,6 +573,13 @@ if haskey(msg0, "dt")
     dt_solid = Float64(msg0["dt"])
     rel = abs(dt_solid - dt) / max(abs(dt), 1.0e-16)
     rel > 1.0e-10 && @warn "Solid/fluid dt mismatch at init: solid=$(dt_solid), fluid=$(dt)"
+end
+if haskey(msg0, "n_span")
+    nspan_solid = Int(msg0["n_span"])
+    if nspan_solid != m_span
+        error("Spanwise mismatch at init: solid n_span=$(nspan_solid), fluid m_span=$(m_span). " *
+              "Set FLUID_N_SPAN or COUPLING_NSPAN_COMM consistently.")
+    end
 end
 apply_from_message!(msg0; first_step=true, step=0)
 

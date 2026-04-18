@@ -11,25 +11,57 @@ parameters["form_compiler"]["optimize"] = True
 
 
 T = float(os.getenv("COUPLING_TTOT", "4.0"))
-Nsteps = int(os.getenv("COUPLING_NSTEPS", "200"))
+Nsteps = int(os.getenv("COUPLING_NSTEPS", "400"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
 
-span = float(os.getenv("SOLID_SPAN", "1.0"))
+span = float(os.getenv("SOLID_SPAN", "0.8"))
 root_chord = float(os.getenv("SOLID_ROOT_CHORD", "0.12"))
 tip_chord = float(os.getenv("SOLID_TIP_CHORD", "0.12"))
 thickness_ratio = float(os.getenv("SOLID_THICKNESS_RATIO", "0.12"))
 leading_edge_sweep = float(os.getenv("SOLID_LE_SWEEP", "0.0"))
 
 nx = int(os.getenv("SOLID_NX", "12"))
-ny = int(os.getenv("SOLID_NY", "120"))
+ny = int(os.getenv("SOLID_NY", "240"))
 nz = int(os.getenv("SOLID_NZ", "6"))
 
 # Communication stations for the fluid v9 spanwise panels.
-n_span_comm = int(os.getenv("COUPLING_NSPAN_COMM", "4"))
+n_span_comm = int(os.getenv("COUPLING_NSPAN_COMM", "80"))
 n_chord_comm = 1
 m_panels_comm = n_span_comm * n_chord_comm
-eta_span_comm = (np.arange(n_span_comm, dtype=float) + 0.5) / n_span_comm
+span_sampling_mode = os.getenv("COUPLING_SPAN_SAMPLING", "node-stride").strip().lower()
+
+
+def build_eta_span_comm(n_span_vals, ny_vals, mode):
+    if n_span_vals < 1:
+        raise ValueError("COUPLING_NSPAN_COMM must be >= 1")
+    if n_span_vals == 1:
+        return np.array([0.0], dtype=float), np.array([0], dtype=int)
+
+    if mode == "midpoint":
+        eta = (np.arange(n_span_vals, dtype=float) + 0.5) / n_span_vals
+        idx = np.round(eta * ny_vals).astype(int)
+        return eta, idx
+
+    if mode == "node-stride":
+        # Example: ny=200 and n_span=4 -> indices [0, 50, 100, 150].
+        stride = max(1, ny_vals // n_span_vals)
+        idx = np.arange(n_span_vals, dtype=int) * stride
+        idx = np.clip(idx, 0, max(ny_vals, 1))
+        if np.unique(idx).size < n_span_vals:
+            idx = np.linspace(0, max(ny_vals - 1, 0), n_span_vals).round().astype(int)
+        eta = idx.astype(float) / max(float(ny_vals), 1.0)
+        return eta, idx
+
+    if mode == "linspace":
+        eta = np.linspace(0.0, 1.0, n_span_vals, endpoint=False)
+        idx = np.round(eta * ny_vals).astype(int)
+        return eta, idx
+
+    raise ValueError(f"Unsupported COUPLING_SPAN_SAMPLING='{mode}'")
+
+
+eta_span_comm, eta_span_comm_indices = build_eta_span_comm(n_span_comm, ny, span_sampling_mode)
 eta_cp = float(os.getenv("COUPLING_ETA_CP", "0.75"))
 eta_cp_comm = np.array([eta_cp], dtype=float)
 
@@ -132,9 +164,13 @@ beta = Constant((gamma + 0.5) ** 2 / 4.0)
 
 print(
     f"Linear solid v13: span={span} m, c_root={root_chord} m, c_tip={tip_chord} m, "
-    f"E={E:.3e} Pa, rho={rho_s} kg/m^3, comm_stations={n_span_comm}"
+    f"E={E:.3e} Pa, rho={rho_s} kg/m^3, comm_stations={n_span_comm}, "
+    f"sampling={span_sampling_mode}"
 )
 print(f"Time setup: T={T} s, Nsteps={Nsteps}, dt={dt_value}")
+if DEBUG_IO:
+    print(f"Span comm node indices = {eta_span_comm_indices.tolist()}")
+    print(f"Span comm etas         = {eta_span_comm.tolist()}")
 
 du = TrialFunction(V)
 u_ = TestFunction(V)
@@ -508,7 +544,8 @@ def get_nodal_displacements(u_fun, node_ids, dofs_x, dofs_y, dofs_z):
 
 sig = Function(Vsig, name="CauchyStress")
 
-out_dir = os.path.join("..", "results", "v13_linear_edge_coupled")
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+out_dir = os.path.join(repo_root, "results", "solid", "v13_linear_edge_coupled")
 os.makedirs(out_dir, exist_ok=True)
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
 xdmf_file = XDMFFile(xdmf_path)
@@ -720,12 +757,6 @@ for i_step in range(Nsteps):
         interface_disp_cur = get_nodal_displacements(
             u, interface_node_ids, dofs_x, dofs_y, dofs_z
         )
-        u_cp_arr = sample_vector_field_at_targets(
-            u,
-            cp_targets,
-            fallback_tree=interface_tree,
-            fallback_vals=interface_disp_cur,
-        )
         u_le_arr = sample_vector_field_at_targets(
             u,
             le_targets,
@@ -738,6 +769,8 @@ for i_step in range(Nsteps):
             fallback_tree=interface_tree,
             fallback_vals=interface_disp_cur,
         )
+        # Keep CP payload consistent with communicated LE/TE edge displacements.
+        u_cp_arr = (1.0 - eta_cp) * u_le_arr + eta_cp * u_te_arr
         zero_rot = np.zeros_like(u_cp_arr)
 
         if DEBUG_IO and (i_step == 0 or (i_step + 1) % 20 == 0):

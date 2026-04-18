@@ -8,7 +8,7 @@ from typing import Optional, List
 
 HOST = os.getenv("COUPLING_HOST", "127.0.0.1")
 PORT = int(os.getenv("COUPLING_PORT", "9000"))
-NSTEPS = int(os.getenv("COUPLING_NSTEPS", "800"))
+NSTEPS = int(os.getenv("COUPLING_NSTEPS", "200"))
 FORCE_RELAX = float(os.getenv("COUPLING_FORCE_RELAX", "1.0"))
 USE_AITKEN = os.getenv("COUPLING_AITKEN", "1").strip() not in ("0", "false", "False")
 
@@ -77,7 +77,8 @@ while fluid_conn is None or solid_conn is None:
     )
 print("Both participants connected.")
 
-results_dir = os.path.join("results", "coupling")
+repo_root = os.path.dirname(os.path.abspath(__file__))
+results_dir = os.path.join(repo_root, "results", "coupling")
 os.makedirs(results_dir, exist_ok=True)
 log_csv = os.path.join(results_dir, "coupling_history.csv")
 log_fp = open(log_csv, "w", newline="")
