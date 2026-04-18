@@ -270,9 +270,15 @@ mkpath(save_path)
 # Maximum number of particles (must be Int for FLOWVPM.ParticleField constructor)
 max_particles = Int((nsteps+1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step+1) + p_per_step))
 
-# Enable shedding from all chordwise rows in this v8 variant.
-# omit_shedding_rows = Int[]
-omit_shedding_rows = collect(1:max(0, n_chord-1))
+# Shedding rows control:
+# - default keeps all chordwise rows active (less surprising for debugging)
+# - set FLUID_V8_SHED_TE_ONLY=1 to shed trailing-edge row only.
+shed_te_only = lowercase(get(ENV, "FLUID_V8_SHED_TE_ONLY", "0")) ∉ ("0", "false", "no")
+omit_shedding_rows = shed_te_only ? collect(1:max(0, n_chord - 1)) : Int[]
+println(
+    "v8 shedding rows active: $(n_chord - length(omit_shedding_rows)) / $(n_chord) " *
+    "(te_only=$(shed_te_only))"
+)
 
 # Wake treatment adapted from standard FLOWUnsteady examples to keep the
 # particle field bounded during long coupled runs.
@@ -933,7 +939,7 @@ uns.run_simulation(simulation, nsteps;
     shed_unsteady=use_unsteady_shedding,
     unsteady_shedcrit=unsteady_shedcrit,
     omit_shedding=omit_shedding_rows,
-    wake_coupled=false,
+    wake_coupled=true,
     vlm_rlx=vlm_rlx,
     extra_runtime_function=runtime_pipeline,
     save_path=save_path,

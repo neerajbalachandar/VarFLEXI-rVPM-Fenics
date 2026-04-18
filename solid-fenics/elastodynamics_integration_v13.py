@@ -38,8 +38,8 @@ leading_edge_sweep = 0.0
 nx, ny = 40, 120
 mesh = RectangleMesh(Point(0.0, 0.0), Point(1.0, span), nx, ny)
 
-n_span = 60
-n_chord = 10
+n_span = 80
+n_chord = 1
 m_panels_comm = n_span * n_chord
 # Use span-panel center stations for communication so eta metadata matches
 # the actual coupling sample locations used in extract_coupling_node_indices.
@@ -80,11 +80,11 @@ for i in range(coords.shape[0]):
     coords[i, 0] = x_leading_edge_at(y_val) + xi * chord
 
 
-def left(x, on_boundary):
+def right(x, on_boundary):
     return near(x[1], 0.0) and on_boundary # BC at span edge - left is front
 
 
-def right(x, on_boundary):
+def left(x, on_boundary):
     return near(x[1], span) and on_boundary
 
 
@@ -752,6 +752,20 @@ def build_output_displacement(q_fun, out_fun):
     out_fun.assign(project(displacement_3d(q_fun), Vt))
 
 
+def edge_expand_from_cp(flat_cp, n_span, n_chord, eta_chord, eta_query):
+    # Build an edge-displacement payload with the same flattened shape as the
+    # CP payload, so downstream decoders can keep using (n_span, n_chord).
+    arr = np.asarray(flat_cp, dtype=float).reshape((n_span, n_chord, 3))
+    eta = as_eta_array(eta_chord, n_chord)
+    out = np.zeros((n_span, n_chord, 3), dtype=float)
+    q = float(np.clip(eta_query, 0.0, 1.0))
+    for i_span in range(n_span):
+        row = arr[i_span, :, :]
+        edge = interp_profile(eta, row, np.array([q], dtype=float))[0, :]
+        out[i_span, :, :] = edge
+    return out.reshape((n_span * n_chord, 3))
+
+
 def evaluate_field_at_targets(u_fun, targets_xyz):
     out = np.zeros((targets_xyz.shape[0], 3), dtype=float)
     for k in range(targets_xyz.shape[0]):
@@ -862,6 +876,8 @@ if work_conservative_mode:
     t_aero.vector().apply("insert")
 
 u_cp0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
+u_le0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
+u_te0 = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
 if DEBUG_IO:
     print(f"SEND init first point = {u_cp0[0]}")
     print(f"SEND init last point  = {u_cp0[-1]}")
@@ -879,7 +895,11 @@ sock.sendall(
                 "eta_span": eta_span_comm.tolist(),
                 "eta_chord": eta_chord_comm.tolist(),
                 "geometry": u_cp0,
+                "geometry_le": u_le0,
+                "geometry_te": u_te0,
                 "rotation": u_cp0,
+                "rotation_le": u_le0,
+                "rotation_te": u_te0,
             }
         )
         + "\n"
@@ -1036,6 +1056,10 @@ for i in range(Nsteps):
         if DEBUG_IO and (i == 0 or (i + 1) % 20 == 0):
             print(f"SEND step {i+1} first point = {u_cp_arr[0, :].tolist()}")
             print(f"SEND step {i+1} last point  = {u_cp_arr[-1, :].tolist()}")
+        u_le_arr = edge_expand_from_cp(u_cp_arr, n_span, n_chord, eta_chord_comm, 0.0)
+        u_te_arr = edge_expand_from_cp(u_cp_arr, n_span, n_chord, eta_chord_comm, 1.0)
+        rot_le_arr = edge_expand_from_cp(rot_cp_arr, n_span, n_chord, eta_chord_comm, 0.0)
+        rot_te_arr = edge_expand_from_cp(rot_cp_arr, n_span, n_chord, eta_chord_comm, 1.0)
         msg_geo = json.dumps(
             {
                 "step": i + 1,
@@ -1048,7 +1072,11 @@ for i in range(Nsteps):
                 "eta_span": eta_span_comm.tolist(),
                 "eta_chord": eta_chord_comm.tolist(),
                 "geometry": u_cp_arr.tolist(),
+                "geometry_le": u_le_arr.tolist(),
+                "geometry_te": u_te_arr.tolist(),
                 "rotation": rot_cp_arr.tolist(),
+                "rotation_le": rot_le_arr.tolist(),
+                "rotation_te": rot_te_arr.tolist(),
             }
         )
         sock.sendall((msg_geo + "\n").encode())
