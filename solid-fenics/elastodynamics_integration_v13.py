@@ -10,8 +10,8 @@ parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
 
-T = float(os.getenv("COUPLING_TTOT", "4.0"))
-Nsteps = int(os.getenv("COUPLING_NSTEPS", "400"))
+T = float(os.getenv("COUPLING_TTOT", "10.0"))
+Nsteps = int(os.getenv("COUPLING_NSTEPS", "2000"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
 
@@ -156,6 +156,26 @@ rho_s = float(os.getenv("SOLID_RHO", "1600.0"))
 rho = Constant(rho_s)
 eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.8")))
 eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-4")))
+inext_penalty_chord_factor = float(
+    os.getenv("SOLID_INEXT_PENALTY_CHORD_FACTOR", "25.0")
+)
+inext_penalty_span_factor = float(
+    os.getenv("SOLID_INEXT_PENALTY_SPAN_FACTOR", "10.0")
+)
+enforce_chord_projection = os.getenv("COUPLING_ENFORCE_CHORD_PROJECTION", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+enforce_span_projection = os.getenv("COUPLING_ENFORCE_SPAN_PROJECTION", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+kappa_inext_chord = Constant(max(inext_penalty_chord_factor, 0.0) * E)
+kappa_inext_span = Constant(max(inext_penalty_span_factor, 0.0) * E)
+e_chord = Constant((1.0, 0.0, 0.0))
+e_span = Constant((0.0, 1.0, 0.0))
 
 alpha_m = Constant(0.10)
 alpha_f = Constant(0.20)
@@ -168,6 +188,11 @@ print(
     f"sampling={span_sampling_mode}"
 )
 print(f"Time setup: T={T} s, Nsteps={Nsteps}, dt={dt_value}")
+print(
+    f"Inextensibility controls: penalty(chord/span)=({inext_penalty_chord_factor:.2f},{inext_penalty_span_factor:.2f})*E, "
+    f"coupling_chord_projection={enforce_chord_projection}, "
+    f"coupling_span_projection={enforce_span_projection}"
+)
 if DEBUG_IO:
     print(f"Span comm node indices = {eta_span_comm_indices.tolist()}")
     print(f"Span comm etas         = {eta_span_comm.tolist()}")
@@ -193,7 +218,18 @@ def m(u_trial, u_test):
 
 
 def k(u_trial, u_test):
-    return inner(sigma(u_trial), sym(grad(u_test))) * dx
+    base = inner(sigma(u_trial), sym(grad(u_test))) * dx
+
+    # Penalize extensional strain along chord/span directions to reduce
+    # artificial panel stretching in the coupled geometry transfer.
+    eps_trial = sym(grad(u_trial))
+    eps_test = sym(grad(u_test))
+    gct = dot(e_chord, eps_trial * e_chord)
+    gcs = dot(e_chord, eps_test * e_chord)
+    gst = dot(e_span, eps_trial * e_span)
+    gss = dot(e_span, eps_test * e_span)
+    pen = kappa_inext_chord * gct * gcs * dx + kappa_inext_span * gst * gss * dx
+    return base + pen
 
 
 def c(u_trial, u_test):
@@ -473,6 +509,71 @@ def sample_vector_field_at_targets(u_fun, targets_xyz, fallback_tree=None, fallb
             _, idx = fallback_tree.query(targets_xyz[k_idx, :], k=1)
             out[k_idx, :] = fallback_vals[int(idx), :]
     return out
+
+
+def project_le_te_inextensible(u_le_arr, u_te_arr, le_ref, te_ref):
+    # Enforce reference chord length at each span station in communicated geometry.
+    Xle = le_ref + u_le_arr
+    Xte = te_ref + u_te_arr
+    mid = 0.5 * (Xle + Xte)
+
+    ref_vec = te_ref - le_ref
+    ref_len = np.linalg.norm(ref_vec, axis=1)
+
+    cur_vec = Xte - Xle
+    cur_len = np.linalg.norm(cur_vec, axis=1)
+    eps = 1.0e-14
+
+    ref_dir = np.zeros_like(ref_vec)
+    ok_ref = ref_len > eps
+    ref_dir[ok_ref, :] = ref_vec[ok_ref, :] / ref_len[ok_ref, None]
+    if np.any(~ok_ref):
+        ref_dir[~ok_ref, :] = np.array([1.0, 0.0, 0.0], dtype=float)
+
+    cur_dir = np.zeros_like(cur_vec)
+    ok_cur = cur_len > eps
+    cur_dir[ok_cur, :] = cur_vec[ok_cur, :] / cur_len[ok_cur, None]
+    if np.any(~ok_cur):
+        cur_dir[~ok_cur, :] = ref_dir[~ok_cur, :]
+
+    Xle_p = mid - 0.5 * ref_len[:, None] * cur_dir
+    Xte_p = mid + 0.5 * ref_len[:, None] * cur_dir
+    u_le_p = Xle_p - le_ref
+    u_te_p = Xte_p - te_ref
+    return u_le_p, u_te_p, cur_len, ref_len
+
+
+def project_spanwise_inextensible_line(u_line, ref_line):
+    # Enforce reference segment lengths along a spanwise polyline (LE or TE).
+    X = ref_line + u_line
+    n_pts = X.shape[0]
+    if n_pts <= 1:
+        return u_line, np.zeros((0,), dtype=float), np.zeros((0,), dtype=float)
+
+    seg_ref_vec = ref_line[1:, :] - ref_line[:-1, :]
+    seg_ref_len = np.linalg.norm(seg_ref_vec, axis=1)
+    seg_cur_vec = X[1:, :] - X[:-1, :]
+    seg_cur_len = np.linalg.norm(seg_cur_vec, axis=1)
+
+    Xp = np.zeros_like(X)
+    Xp[0, :] = X[0, :]
+    eps = 1.0e-14
+    for i in range(1, n_pts):
+        v = X[i, :] - X[i - 1, :]
+        lv = np.linalg.norm(v)
+        if lv > eps:
+            d = v / lv
+        else:
+            rv = ref_line[i, :] - ref_line[i - 1, :]
+            lrv = np.linalg.norm(rv)
+            if lrv > eps:
+                d = rv / lrv
+            else:
+                d = np.array([0.0, 1.0, 0.0], dtype=float)
+        Xp[i, :] = Xp[i - 1, :] + seg_ref_len[i - 1] * d
+
+    u_proj = Xp - ref_line
+    return u_proj, seg_cur_len, seg_ref_len
 
 
 def build_local_rbf_map(fluid_points, solid_points, epsilon, n_neighbors=24):
@@ -769,6 +870,36 @@ for i_step in range(Nsteps):
             fallback_tree=interface_tree,
             fallback_vals=interface_disp_cur,
         )
+        if enforce_chord_projection:
+            u_le_arr, u_te_arr, chord_len_cur, chord_len_ref = project_le_te_inextensible(
+                u_le_arr, u_te_arr, le_targets, te_targets
+            )
+            if DEBUG_IO and (i_step == 0 or (i_step + 1) % 20 == 0):
+                rel_ch = np.abs(chord_len_cur - chord_len_ref) / np.maximum(chord_len_ref, 1.0e-14)
+                print(
+                    f"Chord projection step {i_step+1}: "
+                    f"pre-proj rel chord err max/mean = {np.max(rel_ch):.3e}/{np.mean(rel_ch):.3e}"
+                )
+        if enforce_span_projection:
+            u_le_arr, span_len_cur_le, span_len_ref_le = project_spanwise_inextensible_line(
+                u_le_arr, le_targets
+            )
+            u_te_arr, span_len_cur_te, span_len_ref_te = project_spanwise_inextensible_line(
+                u_te_arr, te_targets
+            )
+            if DEBUG_IO and (i_step == 0 or (i_step + 1) % 20 == 0):
+                if span_len_ref_le.size > 0:
+                    rel_sp_le = np.abs(span_len_cur_le - span_len_ref_le) / np.maximum(
+                        span_len_ref_le, 1.0e-14
+                    )
+                    rel_sp_te = np.abs(span_len_cur_te - span_len_ref_te) / np.maximum(
+                        span_len_ref_te, 1.0e-14
+                    )
+                    print(
+                        f"Span projection step {i_step+1}: "
+                        f"LE pre-proj rel seg err max/mean = {np.max(rel_sp_le):.3e}/{np.mean(rel_sp_le):.3e}, "
+                        f"TE pre-proj rel seg err max/mean = {np.max(rel_sp_te):.3e}/{np.mean(rel_sp_te):.3e}"
+                    )
         # Keep CP payload consistent with communicated LE/TE edge displacements.
         u_cp_arr = (1.0 - eta_cp) * u_le_arr + eta_cp * u_te_arr
         zero_rot = np.zeros_like(u_cp_arr)

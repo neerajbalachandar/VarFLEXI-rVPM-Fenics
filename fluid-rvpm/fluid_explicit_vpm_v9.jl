@@ -89,8 +89,8 @@ gamma = 0.0
 comm_n_span = parse(Int, get(ENV, "COUPLING_NSPAN_COMM", "80"))
 n_span = parse(Int, get(ENV, "FLUID_N_SPAN", string(comm_n_span)))
 
-ttot = parse(Float64, get(ENV, "COUPLING_TTOT", "4.0"))
-nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "400"))
+ttot = parse(Float64, get(ENV, "COUPLING_TTOT", "10.0"))
+nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "2000"))
 dt = ttot / nsteps
 
 p_per_step = parse(Int, get(ENV, "FLUID_P_PER_STEP", "2"))
@@ -108,10 +108,12 @@ force_relax = parse(Float64, get(ENV, "FLUID_FORCE_RELAX", "1.0"))
 disp_scale_x = parse(Float64, get(ENV, "FLUID_DISP_SCALE_X", "1.0"))
 disp_scale_y = parse(Float64, get(ENV, "FLUID_DISP_SCALE_Y", "1.0"))
 disp_scale_z = parse(Float64, get(ENV, "FLUID_DISP_SCALE_Z", "1.0"))
-wake_remove_every = parse(Int, get(ENV, "FLUID_WAKE_REMOVE_EVERY", "20"))
-wake_sphere_factor = parse(Float64, get(ENV, "FLUID_WAKE_SPHERE_FACTOR", "30.0"))
-wake_strength_max_factor = parse(Float64, get(ENV, "FLUID_WAKE_STRENGTH_MAX_FACTOR", "0.25"))
-wake_sigma_max_factor = parse(Float64, get(ENV, "FLUID_WAKE_SIGMA_MAX_FACTOR", "8.0"))
+wake_remove_every = parse(Int, get(ENV, "FLUID_WAKE_REMOVE_EVERY", "100"))
+wake_sphere_factor = parse(Float64, get(ENV, "FLUID_WAKE_SPHERE_FACTOR", "200.0"))
+wake_strength_min_factor = parse(Float64, get(ENV, "FLUID_WAKE_STRENGTH_MIN_FACTOR", "1.0e-8"))
+wake_strength_max_factor = parse(Float64, get(ENV, "FLUID_WAKE_STRENGTH_MAX_FACTOR", "50.0"))
+wake_sigma_min_factor = parse(Float64, get(ENV, "FLUID_WAKE_SIGMA_MIN_FACTOR", "1.0e-3"))
+wake_sigma_max_factor = parse(Float64, get(ENV, "FLUID_WAKE_SIGMA_MAX_FACTOR", "50.0"))
 
 # Spanwise-only fluid discretization, CP/BV sampled internally from LE/TE.
 eta_cp = 0.75
@@ -166,12 +168,12 @@ max_particles = Int((nsteps + 1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step 
 omit_shedding_rows = Int[]
 
 rmv_strength = 2 * 2 / max(p_per_step, 1) * dt / (1 / 12)
-minmaxGamma = rmv_strength .* [0.0001, wake_strength_max_factor]
+minmaxGamma = rmv_strength .* [wake_strength_min_factor, wake_strength_max_factor]
 wake_treatment_strength = uns.remove_particles_strength(
     minmaxGamma[1]^2, minmaxGamma[2]^2; every_nsteps=max(wake_remove_every, 1)
 )
 
-minmaxsigma = sigma_vpm_overwrite .* [0.1, wake_sigma_max_factor]
+minmaxsigma = sigma_vpm_overwrite .* [wake_sigma_min_factor, wake_sigma_max_factor]
 wake_treatment_sigma = uns.remove_particles_sigma(
     minmaxsigma[1], minmaxsigma[2]; every_nsteps=max(wake_remove_every, 1)
 )
@@ -203,7 +205,9 @@ vpm_fmm_settings = vpm.FMM(
 println(
     "Shedding config v9: spanwise-only wing, n_span=$(n_span), " *
     "omit_shedding rows=$(length(omit_shedding_rows)), wake_sphere_factor=$(wake_sphere_factor), " *
-    "wake_remove_every=$(wake_remove_every)"
+    "wake_remove_every=$(wake_remove_every), " *
+    "wake_strength_factors=($(wake_strength_min_factor),$(wake_strength_max_factor)), " *
+    "wake_sigma_factors=($(wake_sigma_min_factor),$(wake_sigma_max_factor))"
 )
 
 
