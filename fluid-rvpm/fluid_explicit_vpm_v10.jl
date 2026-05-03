@@ -92,11 +92,11 @@ span_sampling_mode = lowercase(strip(get(ENV, "COUPLING_SPAN_SAMPLING", "node-st
 solid_ny_for_sampling = parse(Int, get(ENV, "SOLID_NY", "240"))
 custom_span_stride_raw = get(ENV, "COUPLING_SPAN_STRIDE", "")
 
-ttot = parse(Float64, get(ENV, "COUPLING_TTOT", "10.0"))
-nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "2000"))
+ttot = parse(Float64, get(ENV, "COUPLING_TTOT", "5.0"))
+nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "1000"))
 dt = ttot / nsteps
 
-p_per_step = parse(Int, get(ENV, "FLUID_P_PER_STEP", "2"))
+p_per_step = parse(Int, get(ENV, "FLUID_P_PER_STEP", "1"))
 lambda_vpm = 2.0
 sigma_vpm_overwrite = lambda_vpm * magVinf * dt / max(p_per_step, 1)
 sigma_vlm_solver = -1

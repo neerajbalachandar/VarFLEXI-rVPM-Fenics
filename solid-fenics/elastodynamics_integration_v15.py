@@ -1,3 +1,4 @@
+# Chordwise and spanwise of v14
 from dolfin import *
 import json
 import os
@@ -25,9 +26,9 @@ nx = int(os.getenv("SOLID_NX", "12"))
 ny = int(os.getenv("SOLID_NY", "240"))
 nz = int(os.getenv("SOLID_NZ", "6"))
 
-# Communication stations for the fluid v10 spanwise panels.
+# Communication stations for the fluid panel grid.
 n_span_comm = int(os.getenv("COUPLING_NSPAN_COMM", "80"))
-n_chord_comm = 1
+n_chord_comm = int(os.getenv("COUPLING_NCHORD_COMM", "8"))
 m_panels_comm = n_span_comm * n_chord_comm
 span_sampling_mode = os.getenv("COUPLING_SPAN_SAMPLING", "node-stride").strip().lower()
 span_custom_stride = os.getenv("COUPLING_SPAN_STRIDE")
@@ -83,7 +84,16 @@ def build_eta_span_comm(n_span_vals, ny_vals, mode):
 
 eta_span_comm, eta_span_comm_indices = build_eta_span_comm(n_span_comm, ny, span_sampling_mode)
 eta_cp = float(os.getenv("COUPLING_ETA_CP", "0.75"))
-eta_cp_comm = np.array([eta_cp], dtype=float)
+if n_chord_comm <= 1:
+    eta_chord_edges = np.array([0.0, 1.0], dtype=float)
+    eta_chord_comm = np.array([eta_cp], dtype=float)
+else:
+    eta_chord_edges = np.linspace(0.0, 1.0, n_chord_comm + 1)
+    eta_chord_comm = eta_chord_edges[:-1] + eta_cp * (
+        eta_chord_edges[1:] - eta_chord_edges[:-1]
+    )
+eta_chord_le = eta_chord_edges[:-1].copy()
+eta_chord_te = eta_chord_edges[1:].copy()
 
 work_conservative_mode = True
 rbf_radius = float(os.getenv("COUPLING_RBF_RADIUS", os.getenv("COUPLING_RBF_EPS", "0.08")))
@@ -203,8 +213,8 @@ gamma = Constant(0.5 + alpha_f - alpha_m)
 beta = Constant((gamma + 0.5) ** 2 / 4.0)
 
 print(
-    f"Linear solid v13: span={span} m, c_root={root_chord} m, c_tip={tip_chord} m, "
-    f"E={E:.3e} Pa, rho={rho_s} kg/m^3, comm_stations={n_span_comm}, "
+    f"Linear solid v15: span={span} m, c_root={root_chord} m, c_tip={tip_chord} m, "
+    f"E={E:.3e} Pa, rho={rho_s} kg/m^3, comm_stations={n_span_comm}x{n_chord_comm}, "
     f"sampling={span_sampling_mode}"
 )
 print(f"Time setup: T={T} s, Nsteps={Nsteps}, dt={dt_value}")
@@ -497,20 +507,23 @@ def get_aero_surface_node_ids():
     return np.asarray(sorted(set(ids)), dtype=np.int64), coords_v
 
 
-def build_spanwise_targets(eta_span_vals, xi_val, xi_eps=0.0):
-    pts = np.zeros((len(eta_span_vals), 3), dtype=float)
-    xi_eff = float(np.clip(xi_val, 0.0, 1.0))
-    if xi_eff <= 0.0:
-        xi_eff = min(1.0, xi_eff + xi_eps)
-    elif xi_eff >= 1.0:
-        xi_eff = max(0.0, xi_eff - xi_eps)
-    for i_idx, eta_s in enumerate(eta_span_vals):
+def build_span_chord_targets(eta_span_vals, eta_chord_vals, xi_eps=0.0):
+    pts = np.zeros((len(eta_span_vals) * len(eta_chord_vals), 3), dtype=float)
+    k_idx = 0
+    for eta_s in eta_span_vals:
         y_val = eta_s * span
         chord = chord_at(y_val)
         x_le = x_leading_edge_at(y_val)
-        pts[i_idx, 0] = x_le + xi_eff * chord
-        pts[i_idx, 1] = y_val
-        pts[i_idx, 2] = 0.0
+        for eta_c in eta_chord_vals:
+            xi_eff = float(np.clip(eta_c, 0.0, 1.0))
+            if xi_eff <= 0.0:
+                xi_eff = min(1.0, xi_eff + xi_eps)
+            elif xi_eff >= 1.0:
+                xi_eff = max(0.0, xi_eff - xi_eps)
+            pts[k_idx, 0] = x_le + xi_eff * chord
+            pts[k_idx, 1] = y_val
+            pts[k_idx, 2] = 0.0
+            k_idx += 1
     return pts
 
 
@@ -684,7 +697,7 @@ def get_nodal_displacements(u_fun, node_ids, dofs_x, dofs_y, dofs_z):
 sig = Function(Vsig, name="CauchyStress")
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-out_dir = os.path.join(repo_root, "results", "solid", "v13_linear_edge_coupled")
+out_dir = os.path.join(repo_root, "results", "solid", "v15")
 os.makedirs(out_dir, exist_ok=True)
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
 xdmf_file = XDMFFile(xdmf_path)
@@ -718,9 +731,9 @@ interface_node_ids = aero_node_ids
 interface_coords = aero_coords[interface_node_ids, :]
 interface_tree = cKDTree(interface_coords)
 
-cp_targets = build_spanwise_targets(eta_span_comm, eta_cp, xi_eps=0.0)
-le_targets = build_spanwise_targets(eta_span_comm, 0.0, xi_eps=edge_eval_xi_eps)
-te_targets = build_spanwise_targets(eta_span_comm, 1.0, xi_eps=edge_eval_xi_eps)
+cp_targets = build_span_chord_targets(eta_span_comm, eta_chord_comm, xi_eps=0.0)
+le_targets = build_span_chord_targets(eta_span_comm, eta_chord_le, xi_eps=edge_eval_xi_eps)
+te_targets = build_span_chord_targets(eta_span_comm, eta_chord_te, xi_eps=edge_eval_xi_eps)
 
 np.savetxt(
     os.path.join(out_dir, "coupling_cp_targets.csv"),
@@ -743,6 +756,18 @@ np.savetxt(
     header="x,y,z",
     comments="",
 )
+with open(os.path.join(out_dir, "coupling_targets_indexing.csv"), "w") as fp:
+    fp.write("k,i_span,j_chord,x_cp,y_cp,z_cp,x_le,y_le,z_le,x_te,y_te,z_te\n")
+    k_idx = 0
+    for i_idx in range(n_span_comm):
+        for j_idx in range(n_chord_comm):
+            fp.write(
+                f"{k_idx},{i_idx},{j_idx},"
+                f"{cp_targets[k_idx,0]:.12e},{cp_targets[k_idx,1]:.12e},{cp_targets[k_idx,2]:.12e},"
+                f"{le_targets[k_idx,0]:.12e},{le_targets[k_idx,1]:.12e},{le_targets[k_idx,2]:.12e},"
+                f"{te_targets[k_idx,0]:.12e},{te_targets[k_idx,1]:.12e},{te_targets[k_idx,2]:.12e}\n"
+            )
+            k_idx += 1
 
 nbr_ids, nbr_w = build_local_rbf_map(
     cp_targets, interface_coords, rbf_radius, n_neighbors=rbf_neighbors
@@ -786,7 +811,7 @@ init_msg = {
     "n_chord": n_chord_comm,
     "indexing": "span-major",
     "eta_span": eta_span_comm.tolist(),
-    "eta_chord": eta_cp_comm.tolist(),
+    "eta_chord": eta_chord_comm.tolist(),
     "geometry": zero_payload,
     "geometry_le": zero_payload,
     "geometry_te": zero_payload,
@@ -811,7 +836,7 @@ for i_step in range(Nsteps):
 
     data = json.loads(line)
     forces, used_structured_force = parse_force_payload(
-        data, n_span_comm, n_chord_comm, eta_span_comm, eta_cp_comm
+        data, n_span_comm, n_chord_comm, eta_span_comm, eta_chord_comm
     )
     if not np.isfinite(forces).all():
         raise RuntimeError(f"Non-finite force data at solid step {i_step + 1}")
@@ -919,13 +944,21 @@ for i_step in range(Nsteps):
                     f"pre-proj rel chord err max/mean = {np.max(rel_ch):.3e}/{np.mean(rel_ch):.3e}"
                 )
         if enforce_span_projection:
-            u_le_arr, span_len_cur_le, span_len_ref_le = project_spanwise_inextensible_line(
-                u_le_arr, le_targets
-            )
-            u_te_arr, span_len_cur_te, span_len_ref_te = project_spanwise_inextensible_line(
-                u_te_arr, te_targets
-            )
-            if DEBUG_IO and (i_step == 0 or (i_step + 1) % 20 == 0):
+            u_le_grid = u_le_arr.reshape((n_span_comm, n_chord_comm, 3))
+            u_te_grid = u_te_arr.reshape((n_span_comm, n_chord_comm, 3))
+            le_ref_grid = le_targets.reshape((n_span_comm, n_chord_comm, 3))
+            te_ref_grid = te_targets.reshape((n_span_comm, n_chord_comm, 3))
+            rel_sp_le_all = []
+            rel_sp_te_all = []
+            for j_idx in range(n_chord_comm):
+                u_le_col, span_len_cur_le, span_len_ref_le = project_spanwise_inextensible_line(
+                    u_le_grid[:, j_idx, :], le_ref_grid[:, j_idx, :]
+                )
+                u_te_col, span_len_cur_te, span_len_ref_te = project_spanwise_inextensible_line(
+                    u_te_grid[:, j_idx, :], te_ref_grid[:, j_idx, :]
+                )
+                u_le_grid[:, j_idx, :] = u_le_col
+                u_te_grid[:, j_idx, :] = u_te_col
                 if span_len_ref_le.size > 0:
                     rel_sp_le = np.abs(span_len_cur_le - span_len_ref_le) / np.maximum(
                         span_len_ref_le, 1.0e-14
@@ -933,13 +966,30 @@ for i_step in range(Nsteps):
                     rel_sp_te = np.abs(span_len_cur_te - span_len_ref_te) / np.maximum(
                         span_len_ref_te, 1.0e-14
                     )
+                    rel_sp_le_all.append(rel_sp_le)
+                    rel_sp_te_all.append(rel_sp_te)
+            u_le_arr = u_le_grid.reshape((-1, 3))
+            u_te_arr = u_te_grid.reshape((-1, 3))
+            if DEBUG_IO and (i_step == 0 or (i_step + 1) % 20 == 0):
+                if len(rel_sp_le_all) > 0:
+                    rel_sp_le = np.concatenate(rel_sp_le_all)
+                    rel_sp_te = np.concatenate(rel_sp_te_all)
                     print(
                         f"Span projection step {i_step+1}: "
                         f"LE pre-proj rel seg err max/mean = {np.max(rel_sp_le):.3e}/{np.mean(rel_sp_le):.3e}, "
                         f"TE pre-proj rel seg err max/mean = {np.max(rel_sp_te):.3e}/{np.mean(rel_sp_te):.3e}"
                     )
         # Keep CP payload consistent with communicated LE/TE edge displacements.
-        u_cp_arr = (1.0 - eta_cp) * u_le_arr + eta_cp * u_te_arr
+        u_le_grid = u_le_arr.reshape((n_span_comm, n_chord_comm, 3))
+        u_te_grid = u_te_arr.reshape((n_span_comm, n_chord_comm, 3))
+        d_eta = np.maximum(eta_chord_te - eta_chord_le, 1.0e-14)
+        cp_w = (eta_chord_comm - eta_chord_le) / d_eta
+        cp_w = np.clip(cp_w, 0.0, 1.0)
+        u_cp_grid = np.zeros_like(u_le_grid)
+        for j_idx in range(n_chord_comm):
+            w = cp_w[j_idx]
+            u_cp_grid[:, j_idx, :] = (1.0 - w) * u_le_grid[:, j_idx, :] + w * u_te_grid[:, j_idx, :]
+        u_cp_arr = u_cp_grid.reshape((-1, 3))
         zero_rot = np.zeros_like(u_cp_arr)
 
         if DEBUG_IO and (i_step == 0 or (i_step + 1) % 20 == 0):
@@ -956,7 +1006,7 @@ for i_step in range(Nsteps):
                 "n_chord": n_chord_comm,
                 "indexing": "span-major",
                 "eta_span": eta_span_comm.tolist(),
-                "eta_chord": eta_cp_comm.tolist(),
+                "eta_chord": eta_chord_comm.tolist(),
                 "geometry": u_cp_arr.tolist(),
                 "geometry_le": u_le_arr.tolist(),
                 "geometry_te": u_te_arr.tolist(),
@@ -974,7 +1024,7 @@ print("Solid solver finished.")
 print(f"Solid field outputs: {xdmf_path}")
 print(f"Solid VTK outputs: {u_pvd_path}, {sig_pvd_path}, {mesh_pvd_path}")
 
-diag_csv = os.path.join(out_dir, "solid_v13_diagnostics.csv")
+diag_csv = os.path.join(out_dir, "solid_v15_diagnostics.csv")
 with open(diag_csv, "w") as fp:
     fp.write("step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error\n")
     for k_idx in range(Nsteps):
