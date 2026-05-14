@@ -165,6 +165,7 @@ f_aero = Function(Vload, name="AerodynamicLoadDensity")
 E = float(os.getenv("SOLID_E", "6.8e10"))
 nu = float(os.getenv("SOLID_NU", "0.35"))
 plate_thickness = float(os.getenv("SOLID_PLATE_THICKNESS", str(root_chord * thickness_ratio)))
+stress_zeta = float(os.getenv("SOLID_STRESS_ZETA", "0.5"))
 E_c = Constant(E)
 nu_c = Constant(nu)
 rho_s = float(os.getenv("SOLID_RHO", "1600.0"))
@@ -201,7 +202,7 @@ beta = Constant((gamma + 0.5) ** 2 / 4.0)
 print(
     f"von Karman plate solid v16: span={span} m, c_root={root_chord} m, c_tip={tip_chord} m, "
     f"h={plate_thickness:.4e} m, E={E:.3e} Pa, rho={rho_s} kg/m^3, "
-    f"comm_stations={n_span_comm}x{n_chord_comm}, "
+    f"stress_zeta={stress_zeta:.3f}, comm_stations={n_span_comm}x{n_chord_comm}, "
     f"sampling={span_sampling_mode}"
 )
 print(f"Time setup: T={T} s, Nsteps={Nsteps}, dt={dt_value}")
@@ -235,6 +236,13 @@ def plate_to_vector(q):
     return as_vector((q[0], q[1], q[2]))
 
 
+def kirchhoff_love_displacement(q, x3):
+    v_mid = as_vector((q[0], q[1]))
+    w_mid = q[2]
+    gw = grad(w_mid)
+    return as_vector((v_mid[0] - x3 * gw[0], v_mid[1] - x3 * gw[1], w_mid))
+
+
 def vk_membrane_strain(q):
     v_mid = as_vector((q[0], q[1]))
     w_mid = q[2]
@@ -245,6 +253,10 @@ def vk_membrane_strain(q):
 def vk_bending_strain(q):
     w_mid = q[2]
     return -sym(grad(grad(w_mid)))
+
+
+def vk_strain_at_z(q, x3):
+    return vk_membrane_strain(q) + x3 * vk_bending_strain(q)
 
 
 def plane_stress_energy_density(eps2):
@@ -270,7 +282,8 @@ def plane_stress_sigma(eps2):
 
 
 def sigma(q):
-    sig2 = plane_stress_sigma(vk_membrane_strain(q))
+    x3 = Constant(stress_zeta * plate_thickness)
+    sig2 = plane_stress_sigma(vk_strain_at_z(q, x3))
     return as_tensor(
         (
             (sig2[0, 0], sig2[0, 1], 0.0),
