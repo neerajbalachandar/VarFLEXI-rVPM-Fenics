@@ -113,10 +113,13 @@ unsteady_shedcrit = 0.0
 use_unsteady_shedding = true
 vlm_rlx          = 0.35
 
+use_ftot_force_env = lowercase(strip(get(ENV, "FLUID_USE_FTOT_FORCE", "0"))) ∉ ("0", "false", "no")
+
 println(
     "Fluid run config: AoA=$(AOA) deg, U=$(magVinf) m/s, T=$(ttot) s, " *
     "nsteps=$(nsteps), dt=$(dt), p_per_step=$(p_per_step)"
 )
+println("Fluid force extraction: Ftot enabled=$(use_ftot_force_env) (fallback is Gamma-based)")
 
 # Coupling stabilization (numerical damping)
 geom_relax       = parse(Float64, get(ENV, "FLUID_GEOM_RELAX", "1.0"))
@@ -423,13 +426,13 @@ function read_json_line(sock::TCPSocket, tag::String)
         readline(sock)
     catch err
         if err isa EOFError
-            error("$tag: coupling socket closed")
+            error("$tag: coupling socket closed (likely coupling.py or solid exited)")
         end
         rethrow(err)
     end
     s = String(line)
     if isempty(strip(s))
-        error("$tag: received empty line from coupling")
+        error("$tag: received empty line from coupling (likely coupling.py or solid exited)")
     end
     return JSON.parse(s)
 end
@@ -760,7 +763,7 @@ if used2d0
 end
 
 step_ref = Ref(0)
-use_ftot_force = Ref(true)
+use_ftot_force = Ref(use_ftot_force_env)
 function ensure_gamma!(wing, m)
     if !haskey(wing.sol, "Gamma") || length(wing.sol["Gamma"]) != m
         wing.sol["Gamma"] = zeros(m)
@@ -834,6 +837,9 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
                 vlm.calculate_field(row_wings[j], "Ftot"; rhoinf=rho, t=T)
                 if haskey(row_wings[j].sol, "Ftot")
                     frow = row_wings[j].sol["Ftot"]
+                    if !(frow isa AbstractVector)
+                        frow = nothing
+                    end
                 end
             catch err
                 # Disable repeated failing calls and keep stable fallback.
