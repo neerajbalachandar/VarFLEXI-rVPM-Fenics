@@ -6,6 +6,9 @@ import socket
 
 import numpy as np
 from scipy.spatial import cKDTree
+from fenics_shells import e as shell_e
+from fenics_shells import gamma as rm_gamma
+from fenics_shells import k as shell_k
 
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
@@ -22,9 +25,8 @@ tip_chord = float(os.getenv("SOLID_TIP_CHORD", "0.12"))
 thickness_ratio = float(os.getenv("SOLID_THICKNESS_RATIO", "0.12"))
 leading_edge_sweep = float(os.getenv("SOLID_LE_SWEEP", "0.0"))
 
-nx = int(os.getenv("SOLID_NX", "12"))
-ny = int(os.getenv("SOLID_NY", "240"))
-nz = int(os.getenv("SOLID_NZ", "6"))
+nx = int(os.getenv("SOLID_NX", "40"))
+ny = int(os.getenv("SOLID_NY", "120"))
 
 # Communication stations for the fluid panel grid.
 n_span_comm = int(os.getenv("COUPLING_NSPAN_COMM", "80"))
@@ -129,99 +131,37 @@ mesh = RectangleMesh(Point(0.0, 0.0), Point(1.0, span), nx, ny)
 
 coords = mesh.coordinates()
 for i in range(coords.shape[0]):
-    xi = min(max(coords[i, 0], 1.0e-4), 1.0)
+    xi = min(max(coords[i, 0], 0.0), 1.0)
     y_val = coords[i, 1]
     chord = chord_at(y_val)
-    x_le = x_leading_edge_at(y_val)
-    coords[i, 0] = x_le + xi * chord
+    coords[i, 0] = x_leading_edge_at(y_val) + xi * chord
 
 
 def left(x, on_boundary):
     return near(x[1], 0.0) and on_boundary
 
+V = FunctionSpace(mesh, MixedElement([
+    VectorElement("CG", mesh.ufl_cell(), 2, dim=2),
+    FiniteElement("CG", mesh.ufl_cell(), 2),
+    VectorElement("CG", mesh.ufl_cell(), 2, dim=2),
+]))
 
-facet_markers = MeshFunction("size_t", mesh, mesh.topology().dim() - 1)
-facet_markers.set_all(0)
+Vt = VectorFunctionSpace(mesh, "CG", 1, dim=3)
+Vsig = TensorFunctionSpace(mesh, "DG", 0)
 
+u_vis = Function(Vt, name="Displacement")
 
-class RootBoundary(SubDomain):
-    def inside(self, X, on_boundary):
-        return left(X, on_boundary)
+# Aerodynamic traction field placeholder. External coupling forces are added
+# directly into the mixed state RHS as nodal loads.
+t_aero = Function(Vt, name="AerodynamicTraction")
 
-
-RootBoundary().mark(facet_markers, 1)
-ds_root = Measure("ds", domain=mesh, subdomain_data=facet_markers)
-
-cell = mesh.ufl_cell()
-V_inplane_el = VectorElement("Lagrange", cell, 2, dim=2)
-# Legacy DOLFIN/FFC in this workflow does not support Argyris/Hermite/Bell.
-# Use a configurable C0 Lagrange bending field by default so v16 can run in
-# the coupled setup without JIT element-family failures.
-requested_bending_family = os.getenv("SOLID_BENDING_FAMILY", "Lagrange").strip()
-requested_bending_degree = int(os.getenv("SOLID_BENDING_DEGREE", "3"))
-if requested_bending_degree < 2:
-    raise ValueError("SOLID_BENDING_DEGREE must be >= 2 for curvature terms.")
-
-if requested_bending_family.lower() == "argyris":
-    print(
-        "SOLID_BENDING_FAMILY=Argyris requested, but Argyris is unsupported by "
-        "this FFC build. Falling back to Lagrange."
-    )
-    requested_bending_family = "Lagrange"
-    requested_bending_degree = max(requested_bending_degree, 3)
-
-try:
-    W_bending_el = FiniteElement(requested_bending_family, cell, requested_bending_degree)
-    V = FunctionSpace(mesh, MixedElement([V_inplane_el, W_bending_el]))
-except Exception as exc:
-    if "not supported by FFC" not in str(exc):
-        raise
-    print(
-        "Requested bending element "
-        f"{requested_bending_family}{requested_bending_degree} is unsupported by FFC. "
-        "Falling back to Lagrange3."
-    )
-    requested_bending_family = "Lagrange"
-    requested_bending_degree = 3
-    W_bending_el = FiniteElement(requested_bending_family, cell, requested_bending_degree)
-    V = FunctionSpace(mesh, MixedElement([V_inplane_el, W_bending_el]))
-Vload = VectorFunctionSpace(mesh, "CG", 1, dim=3)
-Vout = VectorFunctionSpace(mesh, "CG", 2, dim=3)
-Vsig = TensorFunctionSpace(mesh, "DG", 0, shape=(3, 3))
-
-f_aero = Function(Vload, name="AerodynamicLoadDensity")
-
-E = float(os.getenv("SOLID_E", "6.8e10"))
+E = float(os.getenv("SOLID_E", "5.0e9"))
 nu = float(os.getenv("SOLID_NU", "0.35"))
-plate_thickness = float(os.getenv("SOLID_PLATE_THICKNESS", str(root_chord * thickness_ratio)))
-stress_zeta = float(os.getenv("SOLID_STRESS_ZETA", "0.5"))
-E_c = Constant(E)
-nu_c = Constant(nu)
-rho_s = float(os.getenv("SOLID_RHO", "1600.0"))
+rho_s = float(os.getenv("SOLID_RHO", "1400.0"))
 rho = Constant(rho_s)
-h_plate = Constant(plate_thickness)
-eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.8")))
-eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-4")))
-inext_penalty_chord_factor = float(
-    os.getenv("SOLID_INEXT_PENALTY_CHORD_FACTOR", "25.0")
-)
-inext_penalty_span_factor = float(
-    os.getenv("SOLID_INEXT_PENALTY_SPAN_FACTOR", "10.0")
-)
-enforce_chord_projection = os.getenv("COUPLING_ENFORCE_CHORD_PROJECTION", "1").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-)
-enforce_span_projection = os.getenv("COUPLING_ENFORCE_SPAN_PROJECTION", "1").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-)
-kappa_inext_chord = Constant(max(inext_penalty_chord_factor, 0.0) * E)
-kappa_inext_span = Constant(max(inext_penalty_span_factor, 0.0) * E)
-e_chord = Constant((1.0, 0.0, 0.0))
-e_span = Constant((0.0, 1.0, 0.0))
+kappa_shear = Constant(5.0 / 6.0)
+eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.05")))
+eta_k = Constant(float(os.getenv("SOLID_ETA_K", "5.0e-5")))
 
 alpha_m = Constant(0.10)
 alpha_f = Constant(0.20)
@@ -229,10 +169,8 @@ gamma = Constant(0.5 + alpha_f - alpha_m)
 beta = Constant((gamma + 0.5) ** 2 / 4.0)
 
 print(
-    f"von Karman plate solid v16: span={span} m, c_root={root_chord} m, c_tip={tip_chord} m, "
-    f"h={plate_thickness:.4e} m, E={E:.3e} Pa, rho={rho_s} kg/m^3, "
-    f"stress_zeta={stress_zeta:.3f}, bending={requested_bending_family}"
-    f"{requested_bending_degree}, comm_stations={n_span_comm}x{n_chord_comm}, "
+    f"Reissner-Mindlin plate v16: span={span} m, c_root={root_chord} m, c_tip={tip_chord} m, "
+    f"E={E:.3e} Pa, rho={rho_s} kg/m^3, comm_stations={n_span_comm}x{n_chord_comm}, "
     f"sampling={span_sampling_mode}"
 )
 print(f"Time setup: T={T} s, Nsteps={Nsteps}, dt={dt_value}")
@@ -241,106 +179,104 @@ print(
     f"neighbors={rbf_neighbors}"
 )
 print(
-    f"Coupling geometry controls: chord_projection={enforce_chord_projection}, "
-    f"coupling_span_projection={enforce_span_projection}"
+    f"Plate thickness h={root_chord * thickness_ratio:.4e} m, "
+    f"mesh={nx}x{ny}"
 )
-if float(eta_k) != 0.0:
-    print("Note: SOLID_ETA_K is ignored in the nonlinear von Karman solve; mass-proportional damping SOLID_ETA_M is used.")
 if DEBUG_IO:
     print(f"Span comm node indices = {eta_span_comm_indices.tolist()}")
     print(f"Span comm etas         = {eta_span_comm.tolist()}")
 
-q_ = TestFunction(V)
-dq = TrialFunction(V)
-u = Function(V, name="PlateState")
-u_old = Function(V)
+q = Function(V, name="PlateState")
+q_old = Function(V)
 v_old = Function(V)
 a_old = Function(V)
 
-zero_v = Constant((0.0, 0.0))
-zero_w = Constant(0.0)
-bcs = [DirichletBC(V.sub(0), zero_v, left), DirichletBC(V.sub(1), zero_w, left)]
+dq_trial = TrialFunction(V)
+q_test = TestFunction(V)
+
+u_zero = Constant((0.0, 0.0))
+bc_u = DirichletBC(V.sub(0), u_zero, left)
+bc_w = DirichletBC(V.sub(1), Constant(0.0), left)
+bc_theta = DirichletBC(V.sub(2), u_zero, left)
+bcs = [bc_u, bc_w, bc_theta]
 
 
-def plate_to_vector(q):
-    return as_vector((q[0], q[1], q[2]))
+I2 = Identity(2)
+
+h = Constant(root_chord * thickness_ratio)
 
 
-def kirchhoff_love_displacement(q, x3):
-    v_mid = as_vector((q[0], q[1]))
-    w_mid = q[2]
-    gw = grad(w_mid)
-    return as_vector((v_mid[0] - x3 * gw[0], v_mid[1] - x3 * gw[1], w_mid))
+def membrane_strain(u_mem):
+    return shell_e(u_mem)
 
 
-def vk_membrane_strain(q):
-    v_mid = as_vector((q[0], q[1]))
-    w_mid = q[2]
-    gw = grad(w_mid)
-    return sym(grad(v_mid)) + 0.5 * outer(gw, gw)
+def curvature(theta):
+    return shell_k(theta)
 
 
-def vk_bending_strain(q):
-    w_mid = q[2]
-    return -sym(grad(grad(w_mid)))
+def membrane_stress(u_mem):
+    eps = membrane_strain(u_mem)
+    coeff = E * h / (1.0 - nu ** 2)
+    return coeff * ((1.0 - nu) * eps + nu * tr(eps) * I2)
 
 
-def vk_strain_at_z(q, x3):
-    return vk_membrane_strain(q) + x3 * vk_bending_strain(q)
+def bending_moment(theta):
+    kap = curvature(theta)
+    coeff = E * h ** 3 / (12.0 * (1.0 - nu ** 2))
+    return coeff * ((1.0 - nu) * kap + nu * tr(kap) * I2)
 
 
-def plane_stress_energy_density(eps2):
-    e11 = eps2[0, 0]
-    e22 = eps2[1, 1]
-    e12 = eps2[0, 1]
-    return E_c / (2.0 * (1.0 - nu_c ** 2)) * (
-        e11 ** 2 + e22 ** 2 + 2.0 * nu_c * e11 * e22 + 2.0 * (1.0 - nu_c) * e12 ** 2
+def split_state(x):
+    try:
+        return split(x)
+    except Exception:
+        u_mem = as_vector((x[0], x[1]))
+        w = x[2]
+        theta = as_vector((x[3], x[4]))
+        return u_mem, w, theta
+
+
+def displacement_3d(x):
+    u_mem, w, _theta = split_state(x)
+    return as_vector((u_mem[0], u_mem[1], w))
+
+
+def m_state(x, y):
+    u_x, w_x, theta_x = split_state(x)
+    u_y, w_y, theta_y = split_state(y)
+    inertia_rot = rho * h ** 3 / 12.0
+    return (
+        rho * h * (inner(u_x, u_y) + w_x * w_y) * dx
+        + inertia_rot * inner(theta_x, theta_y) * dx
     )
 
 
-def plane_stress_sigma(eps2):
-    e11 = eps2[0, 0]
-    e22 = eps2[1, 1]
-    e12 = eps2[0, 1]
-    c = E_c / (1.0 - nu_c ** 2)
-    return as_tensor(
-        (
-            (c * (e11 + nu_c * e22), E_c / (1.0 + nu_c) * e12),
-            (E_c / (1.0 + nu_c) * e12, c * (nu_c * e11 + e22)),
-        )
-    )
+def k_state(x, y):
+    u_x, w_x, theta_x = split_state(x)
+    u_y, w_y, theta_y = split_state(y)
+
+    eps_y = membrane_strain(u_y)
+    kap_y = curvature(theta_y)
+    gam_x = rm_gamma(theta_x, w_x)
+    gam_y = rm_gamma(theta_y, w_y)
+
+    N_x = membrane_stress(u_x)
+    M_x = bending_moment(theta_x)
+    G_shear = Constant(E / (2.0 * (1.0 + nu)))
+    K_shear = kappa_shear * G_shear * h
+
+    membrane_term = inner(N_x, eps_y) * dx
+    bending_term = inner(M_x, kap_y) * dx
+    shear_term = K_shear * inner(gam_x, gam_y) * dx
+    return membrane_term + bending_term + shear_term
 
 
-def sigma(q):
-    x3 = Constant(stress_zeta * plate_thickness)
-    sig2 = plane_stress_sigma(vk_strain_at_z(q, x3))
-    return as_tensor(
-        (
-            (sig2[0, 0], sig2[0, 1], 0.0),
-            (sig2[1, 0], sig2[1, 1], 0.0),
-            (0.0, 0.0, 0.0),
-        )
-    )
+def c_state(x, y):
+    return eta_m * m_state(x, y) + eta_k * k_state(x, y)
 
 
-def m(u_trial, u_test):
-    return rho * h_plate * inner(plate_to_vector(u_trial), plate_to_vector(u_test)) * dx
-
-
-def elastic_energy(q):
-    eps_m = vk_membrane_strain(q)
-    kap = vk_bending_strain(q)
-    return h_plate * plane_stress_energy_density(eps_m) * dx + (
-        h_plate ** 3 / 12.0
-    ) * plane_stress_energy_density(kap) * dx
-
-
-def c(u_trial, u_test):
-    return eta_m * m(u_trial, u_test)
-
-
-def Wext(u_test):
-    return inner(plate_to_vector(u_test), f_aero) * dx
+def Wext(y):
+    return dot(displacement_3d(y), t_aero) * dx
 
 
 def update_a(u_new, u_prev, v_prev, a_prev, ufl=True):
@@ -379,28 +315,21 @@ def update_fields(u_fun, u_prev, v_prev, a_prev):
     u_prev.vector()[:] = u_vec
 
 
-def avg(x_old, x_new, alpha):
-    return alpha * x_old + (1.0 - alpha) * x_new
-
-
-a_new = update_a(u, u_old, v_old, a_old, ufl=True)
-v_new = update_v(a_new, u_old, v_old, a_old, ufl=True)
+a_new = update_a(q, q_old, v_old, a_old, ufl=True)
+v_new = update_v(a_new, q_old, v_old, a_old, ufl=True)
 
 res = (
-    m(avg(a_old, a_new, alpha_m), q_)
-    + c(avg(v_old, v_new, alpha_f), q_)
-    + derivative(elastic_energy(u), u, q_)
-    - Wext(q_)
+    m_state(avg(a_old, a_new, alpha_m), q_test)
+    + c_state(avg(v_old, v_new, alpha_f), q_test)
+    + k_state(avg(q_old, q, alpha_f), q_test)
+    - Wext(q_test)
 )
 
-Jac = derivative(res, u, dq)
-problem = NonlinearVariationalProblem(res, u, bcs, Jac)
-solver = NonlinearVariationalSolver(problem)
-solver.parameters["newton_solver"]["linear_solver"] = "mumps"
-solver.parameters["newton_solver"]["absolute_tolerance"] = float(os.getenv("SOLID_NEWTON_ATOL", "1.0e-8"))
-solver.parameters["newton_solver"]["relative_tolerance"] = float(os.getenv("SOLID_NEWTON_RTOL", "1.0e-7"))
-solver.parameters["newton_solver"]["maximum_iterations"] = int(os.getenv("SOLID_NEWTON_MAXIT", "25"))
-solver.parameters["newton_solver"]["error_on_nonconvergence"] = False
+a_form = lhs(res)
+L_form = rhs(res)
+K, _ = assemble_system(a_form, L_form, bcs)
+solver = LUSolver(K, "mumps")
+solver.parameters["symmetric"] = True
 
 
 def local_project(v_expr, Vout, u_out=None):
@@ -560,12 +489,12 @@ def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_o
 
 
 def get_aero_surface_node_ids():
-    v_scalar = Vload.sub(0).collapse()
-    coords_2d = v_scalar.tabulate_dof_coordinates().reshape((-1, 2))
-    coords_v = np.zeros((coords_2d.shape[0], 3), dtype=float)
-    coords_v[:, :2] = coords_2d
-    ids = np.arange(coords_v.shape[0], dtype=np.int64)
-    return ids, coords_v
+    v_scalar = Vt.sub(0).collapse()
+    coords_v = v_scalar.tabulate_dof_coordinates().reshape((-1, mesh.geometry().dim()))
+    coords_xyz = np.zeros((coords_v.shape[0], 3), dtype=float)
+    coords_xyz[:, :2] = coords_v
+    ids = np.arange(coords_xyz.shape[0], dtype=np.int64)
+    return ids, coords_xyz
 
 
 def build_span_chord_targets(eta_span_vals, eta_chord_vals, xi_eps=0.0):
@@ -590,11 +519,16 @@ def build_span_chord_targets(eta_span_vals, eta_chord_vals, xi_eps=0.0):
 
 def sample_vector_field_at_targets(u_fun, targets_xyz, fallback_tree=None, fallback_vals=None):
     out = np.zeros((targets_xyz.shape[0], 3), dtype=float)
+    mesh_dim = u_fun.function_space().mesh().geometry().dim()
     for k_idx in range(targets_xyz.shape[0]):
-        pt = Point(
-            float(targets_xyz[k_idx, 0]),
-            float(targets_xyz[k_idx, 1]),
-        )
+        if mesh_dim == 2:
+            pt = Point(float(targets_xyz[k_idx, 0]), float(targets_xyz[k_idx, 1]))
+        else:
+            pt = Point(
+                float(targets_xyz[k_idx, 0]),
+                float(targets_xyz[k_idx, 1]),
+                float(targets_xyz[k_idx, 2]),
+            )
         try:
             val = u_fun(pt)
             out[k_idx, 0] = float(val[0])
@@ -603,7 +537,7 @@ def sample_vector_field_at_targets(u_fun, targets_xyz, fallback_tree=None, fallb
         except RuntimeError:
             if fallback_tree is None or fallback_vals is None:
                 continue
-            _, idx = fallback_tree.query(targets_xyz[k_idx, :], k=1)
+            _, idx = fallback_tree.query(targets_xyz[k_idx, :2] if mesh_dim == 2 else targets_xyz[k_idx, :], k=1)
             out[k_idx, :] = fallback_vals[int(idx), :]
     return out
 
@@ -736,37 +670,32 @@ def apply_Tf_operator(Fa, n_solid_nodes, nbr_ids, nbr_w, A_diag, S_lumped):
     return Fs_coeff, rhs
 
 
-def set_load_density_from_nodal_forces(load_fun, nodal_forces, node_ids, dofs_x, dofs_y, dofs_z, lumped_area):
-    arr = np.zeros(load_fun.vector().local_size(), dtype=float)
-    area = np.maximum(lumped_area[node_ids], 1.0e-16)
-    arr[dofs_x[node_ids]] = nodal_forces[:, 0] / area
-    arr[dofs_y[node_ids]] = nodal_forces[:, 1] / area
-    arr[dofs_z[node_ids]] = nodal_forces[:, 2] / area
-    load_fun.vector().set_local(arr)
-    load_fun.vector().apply("insert")
+def add_nodal_forces_to_rhs(rhs_vec, nodal_forces, node_ids, dofs_x, dofs_y, dofs_w):
+    arr = rhs_vec.get_local()
+    arr[dofs_x[node_ids]] += nodal_forces[:, 0]
+    arr[dofs_y[node_ids]] += nodal_forces[:, 1]
+    arr[dofs_w[node_ids]] += nodal_forces[:, 2]
+    rhs_vec.set_local(arr)
+    rhs_vec.apply("insert")
 
 
-def get_nodal_displacements(u_fun, node_ids, dofs_x, dofs_y, dofs_z):
+def get_nodal_displacements(q_fun, node_ids, dofs_x, dofs_y, dofs_w):
+    q_arr = q_fun.vector().get_local()
     out = np.zeros((len(node_ids), 3), dtype=float)
-    for k_idx, node_id in enumerate(node_ids):
-        X = interface_coords[node_id, :]
-        try:
-            val = u_fun(Point(float(X[0]), float(X[1])))
-            out[k_idx, 0] = float(val[0])
-            out[k_idx, 1] = float(val[1])
-            out[k_idx, 2] = float(val[2])
-        except RuntimeError:
-            pass
+    out[:, 0] = q_arr[dofs_x[node_ids]]
+    out[:, 1] = q_arr[dofs_y[node_ids]]
+    out[:, 2] = q_arr[dofs_w[node_ids]]
     return out
 
 
-sig = Function(Vsig, name="CauchyStress")
-u_out = Function(Vout, name="Displacement")
-area_test = TestFunction(FunctionSpace(mesh, "CG", 1))
-solid_lumped_area = assemble(area_test * dx).get_local()
+def build_output_displacement(q_fun, out_fun):
+    out_fun.assign(project(displacement_3d(q_fun), Vt))
+
+
+sig = Function(Vsig, name="MembraneStress")
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-out_dir = os.path.join(repo_root, "results", "solid", "v16_vk")
+out_dir = os.path.join(repo_root, "results", "solid", "v15")
 os.makedirs(out_dir, exist_ok=True)
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
 xdmf_file = XDMFFile(xdmf_path)
@@ -849,9 +778,12 @@ print(
     f"cp_stations={len(cp_targets)}, RBF neighbors={nbr_ids.shape[1]}"
 )
 
-dofs_x = np.asarray(Vload.sub(0).dofmap().dofs(), dtype=np.int64)
-dofs_y = np.asarray(Vload.sub(1).dofmap().dofs(), dtype=np.int64)
-dofs_z = np.asarray(Vload.sub(2).dofmap().dofs(), dtype=np.int64)
+dofs_u_x = np.asarray(V.sub(0).sub(0).dofmap().dofs(), dtype=np.int64)
+dofs_u_y = np.asarray(V.sub(0).sub(1).dofmap().dofs(), dtype=np.int64)
+dofs_w = np.asarray(V.sub(1).dofmap().dofs(), dtype=np.int64)
+
+ext_force_vec_template = q.vector().copy()
+ext_force_vec_template.zero()
 
 time = np.linspace(0.0, T, Nsteps + 1)
 u_tip = np.zeros((Nsteps + 1,), dtype=float)
@@ -888,11 +820,12 @@ init_msg = {
 sock.sendall((json.dumps(init_msg) + "\n").encode())
 print("Initial zero geometry sent.")
 
-local_project(plate_to_vector(u), Vout, u_out)
-xdmf_file.write(u_out, 0.0)
-local_project(sigma(u), Vsig, sig)
+build_output_displacement(q, u_vis)
+q_mem0, _q_w0, _q_theta0 = q.split(deepcopy=True)
+local_project(membrane_stress(q_mem0), Vsig, sig)
+xdmf_file.write(u_vis, 0.0)
 xdmf_file.write(sig, 0.0)
-u_pvd << (u_out, 0.0)
+u_pvd << (u_vis, 0.0)
 sig_pvd << (sig, 0.0)
 
 for i_step in range(Nsteps):
@@ -931,65 +864,24 @@ for i_step in range(Nsteps):
         if not np.isfinite(nodal_forces).all():
             raise RuntimeError(f"Non-finite mapped nodal forces at solid step {i_step + 1}")
 
+    b = assemble(L_form)
     if nodal_forces is not None:
-        set_load_density_from_nodal_forces(
-            f_aero,
-            nodal_forces,
-            interface_node_ids,
-            dofs_x,
-            dofs_y,
-            dofs_z,
-            solid_lumped_area,
+        ext_force_vec = ext_force_vec_template.copy()
+        ext_force_vec.zero()
+        add_nodal_forces_to_rhs(
+            ext_force_vec, nodal_forces, interface_node_ids, dofs_u_x, dofs_u_y, dofs_w
         )
-    else:
-        f_aero.vector().zero()
-        f_aero.vector().apply("insert")
-    converged = False
-    n_it = -1
-    try:
-        solve_out = solver.solve()
-        # DOLFIN versions may return:
-        #   - (iterations, converged)
-        #   - iterations
-        #   - None
-        if isinstance(solve_out, tuple):
-            if len(solve_out) >= 2:
-                n_it = int(solve_out[0])
-                converged = bool(solve_out[1])
-            elif len(solve_out) == 1:
-                n_it = int(solve_out[0])
-                converged = True
-            else:
-                converged = True
-        elif solve_out is None:
-            converged = True
-        else:
-            n_it = int(solve_out)
-            converged = True
-    except Exception as exc:
-        print(
-            f"WARNING: nonlinear solve raised at solid step {i_step + 1}: {exc}. "
-            "Reusing last converged state for this step."
-        )
-        u.vector()[:] = u_old.vector()
-        u.vector().apply("insert")
-        converged = False
-
-    if not converged:
-        if n_it >= 0:
-            print(
-                f"WARNING: nonlinear solve did not converge at solid step {i_step + 1} "
-                f"(iterations={n_it}). Reusing last converged state for this step."
-            )
-        u.vector()[:] = u_old.vector()
-        u.vector().apply("insert")
+        b.axpy(1.0, ext_force_vec)
+    for bc in bcs:
+        bc.apply(b)
+    solver.solve(q.vector(), b)
 
     if work_conservative_mode and nodal_forces is not None and Fs_coeff is not None:
         interface_disp_prev = get_nodal_displacements(
-            u_old, interface_node_ids, dofs_x, dofs_y, dofs_z
+            q_old, interface_node_ids, dofs_u_x, dofs_u_y, dofs_w
         )
         u_cp_prev = sample_vector_field_at_targets(
-            u_old,
+            u_vis,
             cp_targets,
             fallback_tree=interface_tree,
             fallback_vals=interface_disp_prev,
@@ -1006,39 +898,40 @@ for i_step in range(Nsteps):
                 f"Wf={Wf:.6e}, Ws={Ws:.6e}, rel_err={rel_work_err:.3e}"
             )
 
-    update_fields(u, u_old, v_old, a_old)
+    update_fields(q, q_old, v_old, a_old)
     t = time[i_step + 1]
 
-    local_project(plate_to_vector(u), Vout, u_out)
-    xdmf_file.write(u_out, t)
-    u_pvd << (u_out, float(t))
-    local_project(sigma(u), Vsig, sig)
+    build_output_displacement(q, u_vis)
+    xdmf_file.write(u_vis, t)
+    u_pvd << (u_vis, float(t))
+    q_mem0, _q_w0, _q_theta0 = q.split(deepcopy=True)
+    local_project(membrane_stress(q_mem0), Vsig, sig)
     xdmf_file.write(sig, t)
     sig_pvd << (sig, float(t))
 
-    E_elas = assemble(elastic_energy(u_old))
-    E_kin = 0.5 * assemble(m(v_old, v_old))
-    E_damp_acc += dt_value * assemble(c(v_old, v_old))
+    E_elas = 0.5 * assemble(k_state(q_old, q_old))
+    E_kin = 0.5 * assemble(m_state(v_old, v_old))
+    E_damp_acc += dt_value * assemble(c_state(v_old, v_old))
     E_tot = E_elas + E_kin + E_damp_acc
     energies[i_step + 1, :] = np.array([E_elas, E_kin, E_damp_acc, E_tot])
 
     try:
-        u_tip[i_step + 1] = u(Point(tip_x, tip_y, tip_z))[2]
+        u_tip[i_step + 1] = u_vis(Point(tip_x, tip_y))[2]
     except RuntimeError:
         u_tip[i_step + 1] = 0.0
 
     if i_step < Nsteps - 1:
         interface_disp_cur = get_nodal_displacements(
-            u, interface_node_ids, dofs_x, dofs_y, dofs_z
-        )#gets the diaplcements at the stations which it has to send to the fluid solver
+            q, interface_node_ids, dofs_u_x, dofs_u_y, dofs_w
+        )
         u_le_arr = sample_vector_field_at_targets(
-            u,
+            u_vis,
             le_targets,
             fallback_tree=interface_tree,
             fallback_vals=interface_disp_cur,
         )
         u_te_arr = sample_vector_field_at_targets(
-            u,
+            u_vis,
             te_targets,
             fallback_tree=interface_tree,
             fallback_vals=interface_disp_cur,
@@ -1134,7 +1027,7 @@ print("Solid solver finished.")
 print(f"Solid field outputs: {xdmf_path}")
 print(f"Solid VTK outputs: {u_pvd_path}, {sig_pvd_path}, {mesh_pvd_path}")
 
-diag_csv = os.path.join(out_dir, "solid_v16_vk_diagnostics.csv")
+diag_csv = os.path.join(out_dir, "solid_v15_diagnostics.csv")
 with open(diag_csv, "w") as fp:
     fp.write("step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error\n")
     for k_idx in range(Nsteps):
