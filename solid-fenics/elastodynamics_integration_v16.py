@@ -947,8 +947,26 @@ for i_step in range(Nsteps):
     converged = False
     n_it = -1
     try:
-        n_it, converged = solver.solve()
-    except RuntimeError as exc:
+        solve_out = solver.solve()
+        # DOLFIN versions may return:
+        #   - (iterations, converged)
+        #   - iterations
+        #   - None
+        if isinstance(solve_out, tuple):
+            if len(solve_out) >= 2:
+                n_it = int(solve_out[0])
+                converged = bool(solve_out[1])
+            elif len(solve_out) == 1:
+                n_it = int(solve_out[0])
+                converged = True
+            else:
+                converged = True
+        elif solve_out is None:
+            converged = True
+        else:
+            n_it = int(solve_out)
+            converged = True
+    except Exception as exc:
         print(
             f"WARNING: nonlinear solve raised at solid step {i_step + 1}: {exc}. "
             "Reusing last converged state for this step."

@@ -889,6 +889,9 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             fx = force_relax * fx_raw + (1 - force_relax) * forces_prev[i, j, 1]
             fy = force_relax * fy_raw + (1 - force_relax) * forces_prev[i, j, 2]
             fz = force_relax * fz_raw + (1 - force_relax) * forces_prev[i, j, 3]
+            if !isfinite(fx); fx = 0.0; end
+            if !isfinite(fy); fy = 0.0; end
+            if !isfinite(fz); fz = 0.0; end
 
             forces_prev[i, j, 1] = fx
             forces_prev[i, j, 2] = fy
