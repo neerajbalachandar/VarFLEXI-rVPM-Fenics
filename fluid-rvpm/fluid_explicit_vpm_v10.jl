@@ -642,6 +642,7 @@ end
 apply_from_message!(msg0; first_step=true, step=0)
 
 step_ref = Ref(0)
+use_ftot_force = Ref(true)
 
 function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     step_ref[] += 1
@@ -654,12 +655,16 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     prev_snapshot = copy(forces_prev)
 
     frow = nothing
-    try
-        vlm.calculate_field(wing, "Ftot"; rhoinf=rho, t=T)
-        haskey(wing.sol, "Ftot") && (frow = wing.sol["Ftot"])
-    catch err
-        if step == 1 || step % 20 == 0
-            @warn "Ftot calculation failed at step $step. Falling back to Gamma-based force." exception=(err, catch_backtrace())
+    if use_ftot_force[]
+        try
+            # FLOWVLM force postprocessing can fail for some wing layouts/types.
+            # When it does, keep the coupling stable by permanently falling back
+            # to Gamma-based force (KJ) rather than warning every step.
+            vlm.calculate_field(wing, "Ftot"; rhoinf=rho, t=T)
+            haskey(wing.sol, "Ftot") && (frow = wing.sol["Ftot"])
+        catch err
+            use_ftot_force[] = false
+            @warn "Disabling Ftot-based force extraction; falling back to Gamma-based force. Root cause: $(sprint(showerror, err))"
         end
     end
 
