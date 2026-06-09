@@ -186,13 +186,13 @@ mu = Constant(E / (2.0 * (1.0 + nu)))
 lmbda = Constant(E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu)))
 rho_s = float(os.getenv("SOLID_RHO", "1100.0"))
 rho = Constant(rho_s)
-eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.02")))
-eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-5")))
+eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.01")))
+eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-6")))
 inext_penalty_chord_factor = float(
-    os.getenv("SOLID_INEXT_PENALTY_CHORD_FACTOR", "2.0")
+    os.getenv("SOLID_INEXT_PENALTY_CHORD_FACTOR", "0.01")
 )
 inext_penalty_span_factor = float(
-    os.getenv("SOLID_INEXT_PENALTY_SPAN_FACTOR", "1.0")
+    os.getenv("SOLID_INEXT_PENALTY_SPAN_FACTOR", "0.005")
 )
 enforce_chord_projection = os.getenv("COUPLING_ENFORCE_CHORD_PROJECTION", "1").strip().lower() not in (
     "0",
@@ -274,6 +274,10 @@ heave_expr = Expression(
 
 bc = DirichletBC(V, heave_expr, left)
 
+heave_expr.t = 0.0
+
+u.interpolate(heave_expr)
+u_old.interpolate(heave_expr)
 
 
 I = Identity(mesh.geometry().dim())

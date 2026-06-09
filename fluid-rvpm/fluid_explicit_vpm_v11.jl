@@ -103,7 +103,7 @@ nsteps          = parse(Int, get(ENV, "COUPLING_NSTEPS", "1000"))
 dt              = ttot/nsteps
 
 # VPM parameters
-p_per_step      = parse(Int, get(ENV, "FLUID_P_PER_STEP", "2"))
+p_per_step      = parse(Int, get(ENV, "FLUID_P_PER_STEP", "1"))
 lambda_vpm      = 2.0
 sigma_vpm_overwrite = lambda_vpm * magVinf * dt / p_per_step
 sigma_vlm_solver = -1
