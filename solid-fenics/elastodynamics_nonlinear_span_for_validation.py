@@ -19,15 +19,15 @@ parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
 
-T = float(os.getenv("COUPLING_TTOT", "5.0"))
-Nsteps = int(os.getenv("COUPLING_NSTEPS", "1000"))
+T = float(os.getenv("COUPLING_TTOT", "0.25"))
+Nsteps = int(os.getenv("COUPLING_NSTEPS", "2000"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
 
-span = float(os.getenv("SOLID_SPAN", "0.8"))
-root_chord = float(os.getenv("SOLID_ROOT_CHORD", "0.12"))
-tip_chord = float(os.getenv("SOLID_TIP_CHORD", "0.12"))
-thickness_ratio = float(os.getenv("SOLID_THICKNESS_RATIO", "0.12"))
+span = float(os.getenv("SOLID_SPAN", "0.3"))
+root_chord = float(os.getenv("SOLID_ROOT_CHORD", "0.1"))
+tip_chord = float(os.getenv("SOLID_TIP_CHORD", "0.1"))
+thickness_ratio = float(os.getenv("SOLID_THICKNESS_RATIO", "0.02"))
 leading_edge_sweep = float(os.getenv("SOLID_LE_SWEEP", "0.0"))
 
 nx = int(os.getenv("SOLID_NX", "12"))
@@ -180,19 +180,19 @@ t_heave = Function(Vt, name="TipHeaveForce")
 
 
 
-E = float(os.getenv("SOLID_E", "6.8e10"))
+E = float(os.getenv("SOLID_E", "1.0e8"))
 nu = float(os.getenv("SOLID_NU", "0.35"))
 mu = Constant(E / (2.0 * (1.0 + nu)))
 lmbda = Constant(E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu)))
-rho_s = float(os.getenv("SOLID_RHO", "1600.0"))
+rho_s = float(os.getenv("SOLID_RHO", "1100.0"))
 rho = Constant(rho_s)
-eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.8")))
-eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-4")))
+eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.02")))
+eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-5")))
 inext_penalty_chord_factor = float(
-    os.getenv("SOLID_INEXT_PENALTY_CHORD_FACTOR", "25.0")
+    os.getenv("SOLID_INEXT_PENALTY_CHORD_FACTOR", "2.0")
 )
 inext_penalty_span_factor = float(
-    os.getenv("SOLID_INEXT_PENALTY_SPAN_FACTOR", "10.0")
+    os.getenv("SOLID_INEXT_PENALTY_SPAN_FACTOR", "1.0")
 )
 enforce_chord_projection = os.getenv("COUPLING_ENFORCE_CHORD_PROJECTION", "1").strip().lower() not in (
     "0",
@@ -240,8 +240,41 @@ u_old = Function(V)
 v_old = Function(V)
 a_old = Function(V)
 
-zero = Constant((0.0, 0.0, 0.0))
-bc = DirichletBC(V, zero, left)
+# zero = Constant((0.0, 0.0, 0.0))
+# bc = DirichletBC(V, zero, left)
+
+# ---------------------------------------------------
+# EXPERIMENTAL ROOT HEAVE MOTION
+#
+# z(t) = a_root cos(ω t)
+# ---------------------------------------------------
+
+Uinf = 4.43
+chord = 0.1
+
+kG = 1.82
+
+freq = kG * Uinf / (np.pi * chord)
+
+omega = 2.0 * np.pi * freq
+
+a_root = 0.175 * chord
+
+heave_expr = Expression(
+    (
+        "0.0",
+        "0.0",
+        "A*cos(omega*t)"
+    ),
+    A=a_root,
+    omega=omega,
+    t=0.0,
+    degree=2
+)
+
+bc = DirichletBC(V, heave_expr, left)
+
+
 
 I = Identity(mesh.geometry().dim())
 
@@ -832,6 +865,7 @@ ext_force_vec_template.zero()
 
 time = np.linspace(0.0, T, Nsteps + 1)
 u_tip = np.zeros((Nsteps + 1,), dtype=float)
+u_root = np.zeros((Nsteps + 1,), dtype=float)
 energies = np.zeros((Nsteps + 1, 4), dtype=float)
 E_damp_acc = 0.0
 force_relax = 1.0
@@ -900,15 +934,15 @@ for i_step in range(Nsteps):
 
 
     # Tip heaving excitation
-    t_now =time[i_step]
+    # t_now =time[i_step]
 
-    F0=0.05       # N
-    fh=5.0        # Hz
-    phi=0.0
+    # F0=0.05       # N
+    # fh=5.0        # Hz
+    # phi=0.0
 
-    F_heave=F0*np.sin(2.0*np.pi*fh*t_now + phi)
+    # F_heave=F0*np.sin(2.0*np.pi*fh*t_now + phi)
 
-    forces_eff[-1,2] +=F_heave
+    # forces_eff[-1,2] +=F_heave
 
     nodal_forces = None
     Fs_coeff = None
@@ -987,6 +1021,9 @@ for i_step in range(Nsteps):
     update_fields(u, u_old, v_old, a_old)
     t = time[i_step + 1]
 
+# Change made for heaving wing validation
+    heave_expr.t = t
+
     xdmf_file.write(u, t)
     u_pvd << (u, float(t))
     local_project(sigma(u), Vsig, sig)
@@ -999,10 +1036,37 @@ for i_step in range(Nsteps):
     E_tot = E_elas + E_kin + E_damp_acc
     energies[i_step + 1, :] = np.array([E_elas, E_kin, E_damp_acc, E_tot])
 
+    # try:
+    #     u_tip[i_step + 1] = u(Point(tip_x, tip_y, tip_z))[2]
+    # except RuntimeError:
+    #     u_tip[i_step + 1] = 0.0
+
+    # For the validation
+
+    # ---------------------------------------------------
+    # SAVE TIP DISPLACEMENT
+    # ---------------------------------------------------
+
     try:
         u_tip[i_step + 1] = u(Point(tip_x, tip_y, tip_z))[2]
     except RuntimeError:
         u_tip[i_step + 1] = 0.0
+
+
+    # ---------------------------------------------------
+    # SAVE ROOT DISPLACEMENT
+    #
+    # Root midpoint near clamped edge
+    # ---------------------------------------------------
+
+    root_x = 0.05
+    root_y = 0.0
+    root_z = 0.0
+
+    try:
+        u_root[i_step + 1] = u(Point(root_x, root_y, root_z))[2]
+    except RuntimeError:
+        u_root[i_step + 1] = 0.0
 
     if i_step < Nsteps - 1:
         interface_disp_cur = get_nodal_displacements(
@@ -1098,3 +1162,26 @@ with open(diag_csv, "w") as fp:
         )
 
 print(f"Diagnostics: {diag_csv}")
+
+# ---------------------------------------------------
+# SAVE VALIDATION HISTORY
+# ---------------------------------------------------
+
+validation_csv = os.path.join(
+    out_dir,
+    "validation_history.csv"
+)
+
+np.savetxt(
+    validation_csv,
+    np.column_stack((
+        time,
+        u_root,
+        u_tip
+    )),
+    delimiter=",",
+    header="time,root_z,tip_z",
+    comments=""
+)
+
+print(f"Validation history: {validation_csv}")
