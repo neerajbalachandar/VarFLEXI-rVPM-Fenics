@@ -115,7 +115,7 @@ def naca_half_thickness(xi):
     )
 
 
-# Create 2D midsurface mesh (chord-span plane at z=0)
+# 2d midsurface mesh z=0
 mesh = RectangleMesh(Point(0.0, 0.0), Point(1.0, span), nx, ny)
 
 # Map reference square [0,1]x[0,span] to physical tapered/swept wing planform in chord-span plane
@@ -258,7 +258,7 @@ def m_form(q_trial, q_test):
         + inertia_rot * inner(theta_t, theta_x) * dx
     )
 
-
+#get from the fenics demo 
 def k_form(q_trial, q_test):
     """Plate stiffness: membrane + bending + shear terms"""
     u_t, w_t, theta_t = split_state(q_trial)

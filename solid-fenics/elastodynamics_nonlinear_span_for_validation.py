@@ -260,24 +260,14 @@ omega = 2.0 * np.pi * freq
 
 a_root = 0.175 * chord
 
-heave_expr = Expression(
-    (
-        "0.0",
-        "0.0",
-        "A*cos(omega*t)"
-    ),
-    A=a_root,
-    omega=omega,
-    t=0.0,
-    degree=2
-)
+zero= Constant((0.0, 0.0, 0.0))
 
-bc = DirichletBC(V, heave_expr, left)
+bc = DirichletBC(V,zero, left)
 
-heave_expr.t = 0.0
+#heave_expr.t = 0.0
 
-u.interpolate(heave_expr)
-u_old.interpolate(heave_expr)
+#u.interpolate(heave_expr)
+#u_old.interpolate(heave_expr)
 
 
 I = Identity(mesh.geometry().dim())
@@ -948,20 +938,84 @@ for i_step in range(Nsteps):
 
     # forces_eff[-1,2] +=F_heave
 
+    # --------------------------------------------------
+    # FLUID -> STRUCTURE FORCE TRANSFER
+    # --------------------------------------------------
+
     nodal_forces = None
     Fs_coeff = None
+
     if work_conservative_mode:
+
         Fs_coeff, nodal_forces = apply_Tf_operator(
-            forces_eff, len(interface_node_ids), nbr_ids, nbr_w, A_diag, S_lumped
+            forces_eff,
+            len(interface_node_ids),
+            nbr_ids,
+            nbr_w,
+            A_diag,
+            S_lumped
         )
+
         if not np.isfinite(nodal_forces).all():
-            raise RuntimeError(f"Non-finite mapped nodal forces at solid step {i_step + 1}")
+
+            raise RuntimeError(
+                f"Non-finite mapped nodal forces "
+                f"at solid step {i_step + 1}"
+            )
+
+        # --------------------------------------------------
+        # ROOT HEAVING FORCE
+        # --------------------------------------------------
+
+        t_now = time[i_step]
+
+        Uinf = 4.43
+        chord_ref = 0.1
+        kG = 1.82
+
+        freq = kG * Uinf / (np.pi * chord_ref)
+        omega = 2.0 * np.pi * freq
+
+        F0 = 0.05      # N
+
+        F_heave = F0 * np.cos(
+            omega * t_now
+        )
+
+        #
+        # distribute force across root section nodes
+        #
+
+        root_tol = 1.0e-6
+
+        root_mask = (
+            interface_coords[:, 1] <= root_tol
+        )
+
+        n_root = np.count_nonzero(root_mask)
+
+        if n_root > 0:
+
+            nodal_forces[root_mask, 2] += (
+                F_heave / float(n_root)
+            )
+
+    # --------------------------------------------------
+    # BUILD GLOBAL FORCE VECTOR
+    # --------------------------------------------------
 
     ext_force_vec = ext_force_vec_template.copy()
     ext_force_vec.zero()
+
     if nodal_forces is not None:
+
         add_nodal_forces_to_rhs(
-            ext_force_vec, nodal_forces, interface_node_ids, dofs_x, dofs_y, dofs_z
+            ext_force_vec,
+            nodal_forces,
+            interface_node_ids,
+            dofs_x,
+            dofs_y,
+            dofs_z
         )
 
     converged = False
@@ -1026,7 +1080,7 @@ for i_step in range(Nsteps):
     t = time[i_step + 1]
 
 # Change made for heaving wing validation
-    heave_expr.t = t
+    #heave_expr.t = t
 
     xdmf_file.write(u, t)
     u_pvd << (u, float(t))
