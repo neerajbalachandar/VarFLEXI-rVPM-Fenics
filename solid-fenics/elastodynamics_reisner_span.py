@@ -207,12 +207,9 @@ I2 = Identity(2)
 
 
 def split_state(q_fun):
-
     if isinstance(q_fun, tuple):
         return q_fun
-
     return split(q_fun)
-
 
 def membrane_strain(u_mem):
     """2D membrane strain tensor: e(u) = sym(grad(u))"""
@@ -251,21 +248,37 @@ def displacement_3d(q_fun):
 
 
 def m_form(q_trial, q_test):
-    """Plate inertia: mass term includes translational and rotational parts"""
-    u_t, w_t, theta_t = split_state(q_trial)
-    u_x, w_x, theta_x = split_state(q_test)
-    inertia_rot = rho * h ** 3 / 12.0
+
+    if isinstance(q_trial, tuple):
+        u_t, w_t, theta_t = q_trial
+    else:
+        u_t, w_t, theta_t = split(q_trial)
+
+    if isinstance(q_test, tuple):
+        u_x, w_x, theta_x = q_test
+    else:
+        u_x, w_x, theta_x = split(q_test)
+
+    inertia_rot = rho*h**3/12.0
+
     return (
-        rho * h * (inner(u_t, u_x) + w_t * w_x) * dx
-        + inertia_rot * inner(theta_t, theta_x) * dx
+        rho*h*(inner(u_t,u_x)+w_t*w_x)*dx
+        + inertia_rot*inner(theta_t,theta_x)*dx
     )
 
 #get from the fenics demo 
 def k_form(q_trial, q_test):
-    """Plate stiffness: membrane + bending + shear terms"""
-    u_t, w_t, theta_t = split_state(q_trial)
-    u_x, w_x, theta_x = split_state(q_test)
 
+    if isinstance(q_trial, tuple):
+        u_t, w_t, theta_t = q_trial
+    else:
+        u_t, w_t, theta_t = split(q_trial)
+
+    if isinstance(q_test, tuple):
+        u_x, w_x, theta_x = q_test
+    else:
+        u_x, w_x, theta_x = split(q_test)
+        
     eps_x = membrane_strain(u_x)
     kap_x = curvature(theta_x)
     gam_t = shear_strain(theta_t, w_t)
@@ -328,52 +341,60 @@ def update_fields(q_fun, q_prev, v_prev, a_prev):
     a_prev.vector()[:] = a_vec
     q_prev.vector()[:] = q_vec
 
-
 def avg(x_old, x_new, alpha):
-    return alpha * x_old + (1.0 - alpha) * x_new
+    return alpha*x_old + (1.0-alpha)*x_new
 
 
-a_new = update_a(q, q_old, v_old, a_old, ufl=True)
-v_new = update_v(a_new, q_old, v_old, a_old, ufl=True)
-q_alpha = avg(q_old, q, alpha_f)
+# Split states FIRST
+q_u, q_w, q_th = split(q)
+
+qo_u, qo_w, qo_th = split(q_old)
+
+vo_u, vo_w, vo_th = split(v_old)
+
+ao_u, ao_w, ao_th = split(a_old)
 
 
-a_u_old, a_w_old, a_th_old = split(a_old)
-a_u_new, a_w_new, a_th_new = split(a_new)
+# Accelerations componentwise
+a_u_new = update_a(q_u, qo_u, vo_u, ao_u, ufl=True)
+a_w_new = update_a(q_w, qo_w, vo_w, ao_w, ufl=True)
+a_th_new = update_a(q_th, qo_th, vo_th, ao_th, ufl=True)
 
-v_u_old, v_w_old, v_th_old = split(v_old)
-v_u_new, v_w_new, v_th_new = split(v_new)
+# Velocities componentwise
+v_u_new = update_v(a_u_new, qo_u, vo_u, ao_u, ufl=True)
+v_w_new = update_v(a_w_new, qo_w, vo_w, ao_w, ufl=True)
+v_th_new = update_v(a_th_new, qo_th, vo_th, ao_th, ufl=True)
 
-q_u_old, q_w_old, q_th_old = split(q_old)
-q_u_new, q_w_new, q_th_new = split(q)
 
+# Generalized-alpha fields
 a_alpha = (
-    avg(a_u_old, a_u_new, alpha_m),
-    avg(a_w_old, a_w_new, alpha_m),
-    avg(a_th_old, a_th_new, alpha_m),
+    avg(ao_u, a_u_new, alpha_m),
+    avg(ao_w, a_w_new, alpha_m),
+    avg(ao_th, a_th_new, alpha_m)
 )
 
 v_alpha = (
-    avg(v_u_old, v_u_new, alpha_f),
-    avg(v_w_old, v_w_new, alpha_f),
-    avg(v_th_old, v_th_new, alpha_f),
+    avg(vo_u, v_u_new, alpha_f),
+    avg(vo_w, v_w_new, alpha_f),
+    avg(vo_th, v_th_new, alpha_f)
 )
 
 q_alpha = (
-    avg(q_u_old, q_u_new, alpha_f),
-    avg(q_w_old, q_w_new, alpha_f),
-    avg(q_th_old, q_th_new, alpha_f),
+    avg(qo_u, q_u, alpha_f),
+    avg(qo_w, q_w, alpha_f),
+    avg(qo_th, q_th, alpha_f)
 )
 
 
 res = (
-    m_form(avg(a_old, a_new, alpha_m), q_test)
-    + c_form(avg(v_old, v_new, alpha_f), q_test)
+    m_form(a_alpha, q_test)
+    + c_form(v_alpha, q_test)
     + k_form(q_alpha, q_test)
-    #- Wext(q_test)
+    # - Wext(q_test)
 )
 
 jac = derivative(res, q, dq_trial)
+
 
 #
 # Coupled step-1 is commonly the hardest: the solid starts from rest/zero
