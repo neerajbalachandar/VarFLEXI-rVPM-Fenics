@@ -278,7 +278,7 @@ def k_form(q_trial, q_test):
         u_x, w_x, theta_x = q_test
     else:
         u_x, w_x, theta_x = split(q_test)
-        
+
     eps_x = membrane_strain(u_x)
     kap_x = curvature(theta_x)
     gam_t = shear_strain(theta_t, w_t)
@@ -1064,7 +1064,14 @@ for i_step in range(Nsteps):
 
     # Get tip transverse displacement
     try:
-        u_mem_eval, w_eval, theta_eval = q(Point(tip_x, tip_y))
+        vals = q(Point(tip_x, tip_y))
+
+        ux      = vals[0]
+        uy      = vals[1]
+        w_eval  = vals[2]
+        theta_x = vals[3]
+        theta_y = vals[4]
+
         u_tip[i_step + 1] = float(w_eval)
     except RuntimeError:
         u_tip[i_step + 1] = 0.0
