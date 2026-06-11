@@ -207,9 +207,11 @@ I2 = Identity(2)
 
 
 def split_state(q_fun):
-    """Split mixed plate state into components"""
-    u_mem, w, theta = split(q_fun)
-    return u_mem, w, theta
+
+    if isinstance(q_fun, tuple):
+        return q_fun
+
+    return split(q_fun)
 
 
 def membrane_strain(u_mem):
@@ -335,11 +337,40 @@ a_new = update_a(q, q_old, v_old, a_old, ufl=True)
 v_new = update_v(a_new, q_old, v_old, a_old, ufl=True)
 q_alpha = avg(q_old, q, alpha_f)
 
+
+a_u_old, a_w_old, a_th_old = split(a_old)
+a_u_new, a_w_new, a_th_new = split(a_new)
+
+v_u_old, v_w_old, v_th_old = split(v_old)
+v_u_new, v_w_new, v_th_new = split(v_new)
+
+q_u_old, q_w_old, q_th_old = split(q_old)
+q_u_new, q_w_new, q_th_new = split(q)
+
+a_alpha = (
+    avg(a_u_old, a_u_new, alpha_m),
+    avg(a_w_old, a_w_new, alpha_m),
+    avg(a_th_old, a_th_new, alpha_m),
+)
+
+v_alpha = (
+    avg(v_u_old, v_u_new, alpha_f),
+    avg(v_w_old, v_w_new, alpha_f),
+    avg(v_th_old, v_th_new, alpha_f),
+)
+
+q_alpha = (
+    avg(q_u_old, q_u_new, alpha_f),
+    avg(q_w_old, q_w_new, alpha_f),
+    avg(q_th_old, q_th_new, alpha_f),
+)
+
+
 res = (
     m_form(avg(a_old, a_new, alpha_m), q_test)
     + c_form(avg(v_old, v_new, alpha_f), q_test)
     + k_form(q_alpha, q_test)
-    - Wext(q_test)
+    #- Wext(q_test)
 )
 
 jac = derivative(res, q, dq_trial)
