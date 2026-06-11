@@ -568,21 +568,37 @@ def parse_force_payload(data, n_span_out, n_chord_out, eta_span_out, eta_chord_o
     return forces, False
 
 
+# def get_aero_surface_node_ids():
+#     """Get node IDs of all nodes on the 2D plate surface"""
+#     # For 2D plate, use nodes from the w (transverse) component
+#     v_w = V.sub(1).collapse()
+#     coords_v = v_w.tabulate_dof_coordinates().reshape((-1, 2))
+#     ids = []
+#     for i_node, X in enumerate(coords_v):
+#         y_val = X[1]
+#         if y_val >= 0.0 and y_val <= span:
+#             ids.append(i_node)
+#     # Map back to mixed space indices
+#     w_dofs = np.asarray(V.sub(1).dofmap().dofs(), dtype=np.int64)
+#     mixed_ids = w_dofs[np.asarray(sorted(set(ids)), dtype=np.int64)]
+#     return mixed_ids, coords_v
+
 def get_aero_surface_node_ids():
-    """Get node IDs of all nodes on the 2D plate surface"""
-    # For 2D plate, use nodes from the w (transverse) component
+
     v_w = V.sub(1).collapse()
     coords_v = v_w.tabulate_dof_coordinates().reshape((-1, 2))
+
     ids = []
+
     for i_node, X in enumerate(coords_v):
         y_val = X[1]
-        if y_val >= 0.0 and y_val <= span:
-            ids.append(i_node)
-    # Map back to mixed space indices
-    w_dofs = np.asarray(V.sub(1).dofmap().dofs(), dtype=np.int64)
-    mixed_ids = w_dofs[np.asarray(sorted(set(ids)), dtype=np.int64)]
-    return mixed_ids, coords_v
 
+        if 0.0 <= y_val <= span:
+            ids.append(i_node)
+
+    ids = np.asarray(ids, dtype=np.int64)
+
+    return ids, coords_v
 
 def build_spanwise_targets(eta_span_vals, xi_val, xi_eps=0.0):
     pts = np.zeros((len(eta_span_vals), 3), dtype=float)
@@ -617,7 +633,8 @@ def sample_vector_field_at_targets(u_fun, targets_xyz, fallback_tree=None, fallb
         except RuntimeError:
             if fallback_tree is None or fallback_vals is None:
                 continue
-            _, idx = fallback_tree.query(targets_xyz[k_idx, :], k=1)
+            # _, idx = fallback_tree.query(targets_xyz[k_idx, :], k=1)
+            _, idx = fallback_tree.query(targets_xyz[k_idx,:2], k=1)
             out[k_idx, :] = fallback_vals[int(idx), :]
     return out
 
@@ -797,14 +814,27 @@ sock.connect(
         int(os.getenv("COUPLING_PORT", "9000")),
     )
 )
+
 sock_file = sock.makefile("r")
 sock.sendall((json.dumps({"role": "solid"}) + "\n").encode())
 print("Solid connected.")
 
 print("Building interface sets and communication targets...")
+
+# aero_node_ids, aero_coords = get_aero_surface_node_ids()
+# interface_node_ids = aero_node_ids
+# interface_coords = aero_coords[interface_node_ids, :]
+
+
+
 aero_node_ids, aero_coords = get_aero_surface_node_ids()
+print("len(aero_coords) =", len(aero_coords))
+
+
 interface_node_ids = aero_node_ids
-interface_coords = aero_coords[interface_node_ids, :]
+print("max(interface_node_ids) =", np.max(interface_node_ids))
+interface_coords = aero_coords[interface_node_ids]
+
 interface_tree = cKDTree(interface_coords)
 
 # Rebuild target points for 2D plate (z=0 on midsurface)
@@ -834,9 +864,19 @@ np.savetxt(
     comments="",
 )
 
+cp_targets_2d = cp_targets[:, :2]
+
 nbr_ids, nbr_w = build_local_rbf_map(
-    cp_targets, interface_coords, rbf_radius, n_neighbors=rbf_neighbors
+    cp_targets_2d,
+    interface_coords,
+    rbf_radius,
+    n_neighbors=rbf_neighbors
 )
+
+# nbr_ids, nbr_w = build_local_rbf_map(
+#     cp_targets, interface_coords, rbf_radius, n_neighbors=rbf_neighbors
+# )
+
 A_diag = np.ones((cp_targets.shape[0],), dtype=float)
 S_lumped = compute_S_lumped(len(interface_node_ids), nbr_ids, nbr_w, A_diag)
 
@@ -850,6 +890,7 @@ print(
 dofs_u_x = np.asarray(V.sub(0).sub(0).dofmap().dofs(), dtype=np.int64)  # ux component
 dofs_u_y = np.asarray(V.sub(0).sub(1).dofmap().dofs(), dtype=np.int64)  # uy component
 dofs_w = np.asarray(V.sub(1).dofmap().dofs(), dtype=np.int64)           # w component
+print("len(dofs_w) =", len(dofs_w))
 # Note: theta components (rotations) don't directly couple to point forces
 
 ext_force_vec_template = q.vector().copy()
@@ -889,11 +930,20 @@ init_msg = {
 sock.sendall((json.dumps(init_msg) + "\n").encode())
 print("Initial zero geometry sent.")
 
-xdmf_file.write(q, 0.0)
-# Write membrane stress at t=0
-u_mem_f, w_f, theta_f = q.split(deepcopy=True)
-xdmf_file.write(q, 0.0)
-q_pvd << (q, 0.0)
+# xdmf_file.write(q, 0.0)
+# # Write membrane stress at t=0
+# u_mem_f, w_f, theta_f = q.split(deepcopy=True)
+# xdmf_file.write(q, 0.0)
+# # q_pvd << (q, 0.0)
+# q_pvd << (...)
+
+# xdmf_file.write(q, 0.0)
+
+# u_mem_f, w_f, theta_f = q.split(deepcopy=True)
+
+# xdmf_file.write(q, 0.0)
+
+# q_pvd << (...)
 
 for i_step in range(Nsteps):
     print(f"Solid step {i_step + 1}/{Nsteps}: waiting for force...")
@@ -997,7 +1047,7 @@ for i_step in range(Nsteps):
     t = time[i_step + 1]
 
     xdmf_file.write(q, t)
-    q_pvd << (q, float(t))
+    # q_pvd << (q, float(t))
 
     # Compute strain energy from plate kinematics
     u_mem_t, w_t, theta_t = split(q_old)
