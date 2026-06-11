@@ -155,7 +155,7 @@ V = FunctionSpace(mesh, mixed_element)
 
 # For output: expand 3D displacement (add zero z-component) for aero transfer
 Vt = VectorFunctionSpace(mesh, "CG", 1, dim=3)
-Vsig = TensorFunctionSpace(mesh, "DG", 0, dim=(2, 2))
+Vsig = TensorFunctionSpace(mesh, "DG", 0, shape=(2, 2))
 
 t_aero = Function(Vt, name="AerodynamicTraction")
 
