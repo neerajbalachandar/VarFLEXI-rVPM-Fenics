@@ -93,6 +93,25 @@ max_abs_force_component = float(os.getenv("COUPLING_MAX_FORCE_COMPONENT", "5.0e3
 DEBUG_IO = os.getenv("COUPLING_DEBUG_IO", "0").strip().lower() not in ("0", "false", "no")
 edge_eval_xi_eps = float(os.getenv("COUPLING_EDGE_EVAL_XI_EPS", "1.0e-6"))
 
+enforce_chord_projection = (
+    os.getenv("COUPLING_ENFORCE_CHORD", "0").lower()
+    not in ("0", "false", "no")
+)
+
+enforce_span_projection = (
+    os.getenv("COUPLING_ENFORCE_SPAN", "0").lower()
+    not in ("0", "false", "no")
+)
+
+
+
+
+#just use for now
+enforce_chord_projection = False
+enforce_span_projection = False
+
+
+
 
 def chord_at(y_val):
     eta = min(max(y_val / span, 0.0), 1.0)
@@ -1165,7 +1184,4 @@ with open(diag_csv, "w") as fp:
             f"{k_idx + 1},{time[k_idx + 1]:.12e},{u_tip[k_idx + 1]:.12e},"
             f"{energies[k_idx + 1, 0]:.12e},{energies[k_idx + 1, 1]:.12e},"
             f"{energies[k_idx + 1, 2]:.12e},{energies[k_idx + 1, 3]:.12e},"
-            f"{work_Wf[k_idx]:.12e},{work_Ws[k_idx]:.12e},{work_rel_errors[k_idx]:.12e}\n"
-        )
-
-print(f"Diagnostics: {diag_csv}")
+            f"{work_Wf[k_idx]:.12e},{work_Ws[k_idx]:.12e},{work_rel
