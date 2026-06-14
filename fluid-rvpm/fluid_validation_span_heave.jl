@@ -43,7 +43,7 @@ function wing_maneuver(;
         [
             vehicle_velocity,
             0.0,
-            vz
+            0.0 # no need for defining twice
         ]
     end
 
@@ -162,15 +162,15 @@ span_sampling_mode = lowercase(strip(get(ENV, "COUPLING_SPAN_SAMPLING", "node-st
 solid_ny_for_sampling = parse(Int, get(ENV, "SOLID_NY", "240"))
 custom_span_stride_raw = get(ENV, "COUPLING_SPAN_STRIDE", "")
 
-ttot = parse(Float64, get(ENV, "COUPLING_TTOT", "0.25"))
-nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "2000"))
+ttot = parse(Float64, get(ENV, "COUPLING_TTOT", "0.30"))
+nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "1000"))
 dt = ttot / nsteps
 
 p_per_step = parse(Int, get(ENV, "FLUID_P_PER_STEP", "1"))
 lambda_vpm = 2.0
 sigma_vpm_overwrite = lambda_vpm * magVinf * dt / max(p_per_step, 1)
 sigma_vlm_solver = -1
-sigma_vlm_surf = 0.05 * b
+sigma_vlm_surf = 0.005 * b
 shed_starting = true
 use_unsteady_shedding = true
 unsteady_shedcrit = 0.0
