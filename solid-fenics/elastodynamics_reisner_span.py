@@ -1177,11 +1177,23 @@ print(f"Solid field outputs: {xdmf_path}")
 print(f"Solid VTK outputs: {q_pvd_path}, {sig_pvd_path}, {mesh_pvd_path}")
 
 diag_csv = os.path.join(out_dir, "solid_v18_diagnostics.csv")
+
 with open(diag_csv, "w") as fp:
-    fp.write("step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error\n")
+    fp.write(
+        "step,time,u_tip,E_elas,E_kin,E_damp,E_tot,"
+        "work_Wf,work_Ws,work_rel_error\n"
+    )
+
     for k_idx in range(Nsteps):
         fp.write(
-            f"{k_idx + 1},{time[k_idx + 1]:.12e},{u_tip[k_idx + 1]:.12e},"
-            f"{energies[k_idx + 1, 0]:.12e},{energies[k_idx + 1, 1]:.12e},"
-            f"{energies[k_idx + 1, 2]:.12e},{energies[k_idx + 1, 3]:.12e},"
-            f"{work_Wf[k_idx]:.12e},{work_Ws[k_idx]:.12e},{work_rel
+            f"{k_idx + 1},"
+            f"{time[k_idx + 1]:.12e},"
+            f"{u_tip[k_idx + 1]:.12e},"
+            f"{energies[k_idx + 1, 0]:.12e},"
+            f"{energies[k_idx + 1, 1]:.12e},"
+            f"{energies[k_idx + 1, 2]:.12e},"
+            f"{energies[k_idx + 1, 3]:.12e},"
+            f"{work_Wf[k_idx]:.12e},"
+            f"{work_Ws[k_idx]:.12e},"
+            f"{work_rel_errors[k_idx]:.12e}\n"
+        )
