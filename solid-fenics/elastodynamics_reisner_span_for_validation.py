@@ -233,7 +233,7 @@ a_root = 0.175 * chord
 u_zero_2d = Constant((0.0, 0.0))
 
 heave_expr = Expression(
-    "A*cos(omega*t)",
+    "A*sin(omega*t)",
     A=a_root,
     omega=omega,
     t=0.0,
