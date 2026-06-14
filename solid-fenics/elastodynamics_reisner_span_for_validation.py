@@ -232,12 +232,30 @@ a_root = 0.175 * chord
 
 u_zero_2d = Constant((0.0, 0.0))
 
+# heave_expr = Expression(
+#     "A*cos(omega*t)",
+#     # A=a_root,
+#     A = 0,
+#     omega=omega,
+#     t=0.0,
+#     degree=2
+# )
+
+Tramp = 3.0 / freq     # one oscillation period
+
 heave_expr = Expression(
-    "A*sin(omega*t)",
+    """
+    (t < Tramp) ?
+    A*pow(sin(0.5*pi*t/Tramp),2)*cos(omega*t)
+    :
+    A*cos(omega*t)
+    """,
     A=a_root,
     omega=omega,
+    Tramp=Tramp,
+    pi=np.pi,
     t=0.0,
-    degree=2
+    degree=4
 )
 
 bc_u = DirichletBC(V.sub(0), u_zero_2d, left)
@@ -1060,6 +1078,7 @@ for i_step in range(Nsteps):
         R = assemble(res)
         b = R.copy()
         b *= -1.0
+        
         if force_ramp_iters > 0:
             ramp = min(1.0, float(newton_it + 1) / float(force_ramp_iters))
         else:
@@ -1077,6 +1096,14 @@ for i_step in range(Nsteps):
         linear_solver.solve(A, dq_newton.vector(), b)
         q.vector().axpy(1.0, dq_newton.vector())
         q.vector().apply("insert")
+
+        print(
+            f"Step {i_step+1}, "
+            f"Newton {newton_it}, "
+            f"Residual = {r_norm:.6e}"
+        )
+
+        
     if not converged:
         raise RuntimeError(
             f"Newton failed at solid step {i_step + 1}: "
@@ -1084,6 +1111,7 @@ for i_step in range(Nsteps):
             f"atol={newton_atol:.2e}, rtol={newton_rtol:.2e}, "
             f"maxit={newton_maxit}, ramp_iters={force_ramp_iters}"
         )
+    
 
     if work_conservative_mode and nodal_forces is not None and Fs_coeff is not None:
         interface_disp_prev = get_nodal_displacements_plate(
