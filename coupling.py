@@ -9,8 +9,8 @@ from typing import Optional, List
 HOST = os.getenv("COUPLING_HOST", "127.0.0.1")
 PORT = int(os.getenv("COUPLING_PORT", "9000"))
 NSTEPS = int(os.getenv("COUPLING_NSTEPS", "1000"))
-FORCE_RELAX = float(os.getenv("COUPLING_FORCE_RELAX", "0.6"))
-USE_AITKEN = os.getenv("COUPLING_AITKEN", "1").strip() not in ("0", "false", "False")
+FORCE_RELAX = float(os.getenv("COUPLING_FORCE_RELAX", "0.2"))
+USE_AITKEN = os.getenv("COUPLING_AITKEN", "0").strip() not in ("0", "false", "False")
 
 def port_owner_hint(port):
     try:
@@ -89,18 +89,45 @@ forces_fp = open(forces_jsonl, "w")
 
 prev_forces: Optional[List[List[float]]] = None
 aitken_relax = FORCE_RELAX
+prev_geometry = None
+
+
+
 
 for step in range(1, NSTEPS + 1):
 
     print(f"\n--- Step {step} ---")
 
-    # 1) Receive geometry from solid (line-based)
+    # 1. Receive geometry from solid (line-based)
     print("Waiting for geometry from solid...")
+    
     geo_data = read_json_line(solid_file, "Solid")
+
     print("Geometry received.")
     geometry = geo_data.get("geometry", [])
+
+    sample_geom = geometry[0]
+
+    print(
+        f"Sample geometry[0] = "
+        f"{sample_geom}"
+    )
+
+
+    geom_mag = [
+    (g[0]**2 + g[1]**2 + g[2]**2)**0.5
+    for g in geometry
+    ]
+    
+    print(
+        f"Geometry max={max(geom_mag):.6e}, "
+        f"mean={sum(geom_mag)/len(geom_mag):.6e}"
+    )
+
     if not isinstance(geometry, list) or len(geometry) == 0:
         raise RuntimeError(f"Solid sent invalid geometry payload at step {step}")
+    
+
     n_span = int(geo_data.get("n_span", 0)) if "n_span" in geo_data else 0
     n_chord = int(geo_data.get("n_chord", 0)) if "n_chord" in geo_data else 0
     if n_span > 0 and n_chord > 0:
@@ -110,25 +137,72 @@ for step in range(1, NSTEPS + 1):
                 f"Solid geometry length mismatch at step {step}: "
                 f"received {len(geometry)}, expected {expected} ({n_span}x{n_chord})"
             )
+        
+
         rot = geo_data.get("rotation", [])
         if isinstance(rot, list) and len(rot) not in (0, expected):
             raise RuntimeError(
                 f"Solid rotation length mismatch at step {step}: "
                 f"received {len(rot)}, expected {expected} ({n_span}x{n_chord})"
             )
+        
         idxing = str(geo_data.get("indexing", "span-major"))
         if idxing not in ("span-major", "chord-major"):
             raise RuntimeError(f"Unsupported indexing '{idxing}' at step {step}")
 
-    # 2) Send geometry to fluid
+
+    # 2. Send geometry to fluid
     print("Sending geometry to fluid...")
+
+
     fluid_conn.sendall((json.dumps(geo_data) + "\n").encode())
 
-    # 3) Receive forces from fluid
+
+    geometry_residual = 0.0
+
+    if prev_geometry is not None:
+
+        num = 0.0
+        den = 0.0
+
+        for g_new, g_old in zip(
+            geometry,
+            prev_geometry
+        ):
+
+            dx = g_new[0] - g_old[0]
+            dy = g_new[1] - g_old[1]
+            dz = g_new[2] - g_old[2]
+
+            num += dx*dx + dy*dy + dz*dz
+
+            den += (
+                g_new[0]**2
+                + g_new[1]**2
+                + g_new[2]**2
+            )
+
+        geometry_residual = (
+            num**0.5
+        ) / max(
+            den**0.5,
+            1.0e-16
+        )
+
+    prev_geometry = geometry.copy()
+    print(
+    f"Geometry residual="
+    f"{geometry_residual:.3e}"
+    )
+
+    # 3. Receive forces from fluid
     print("Waiting for forces from fluid...")
+
     force_data = read_json_line(fluid_file, "Fluid")
+    
     print("Forces received.")
     forces = force_data.get("force", [])
+
     if not isinstance(forces, list):
         raise RuntimeError(f"Fluid sent invalid force payload at step {step}")
     if len(forces) == 0:
@@ -141,12 +215,16 @@ for step in range(1, NSTEPS + 1):
                 f"received {len(forces)}, expected {expected} ({n_span}x{n_chord})"
             )
 
-    # Optional explicit coupling relaxation for stability.
-    # This does not turn the scheme into strongly coupled GS sub-iterations,
-    # but helps damp loose-coupling oscillations.
+
+    # Optional Explicit coupling relaxation for stability.
+    # This does not turn the scheme into strongly coupled GS sub-iterations, but helps damp loose-coupling oscillations.
+
     forces_received_raw = [list(map(float, f[:3])) for f in forces]
+
     force_residual = 0.0
+    
     relax_used = FORCE_RELAX
+    
     if prev_forces is not None and len(prev_forces) == len(forces):
         num = 0.0
         den = 0.0
@@ -158,8 +236,8 @@ for step in range(1, NSTEPS + 1):
             den += float(a[0]) ** 2 + float(a[1]) ** 2 + float(a[2]) ** 2
         force_residual = (num ** 0.5) / max(den ** 0.5, 1.0e-16)
 
+    # Simple bounded Aitken-like update based on residual trend.
         if USE_AITKEN:
-            # Simple bounded Aitken-like update based on residual trend.
             if force_residual > 1.0e-2:
                 aitken_relax = max(0.25, 0.9 * aitken_relax)
             else:
@@ -178,10 +256,21 @@ for step in range(1, NSTEPS + 1):
             forces = relaxed
     prev_forces = [list(map(float, f[:3])) for f in forces]
 
-    # DEBUG PRINT
-    print(f"Sample force[0] = {forces[0]} (relax={relax_used:.3f}, residual={force_residual:.3e})")
 
-    forces_sent = [list(map(float, f[:3])) for f in forces]
+# Sample force from first panel from the fluid communicated to solid
+    print(f"Sample force from first cp = {forces[0]} (relax={relax_used:.3f}, force residual={force_residual:.3e})")
+
+    print("Sample geometry[0] =", geometry[0])
+
+    print("Geometry max =", max(geom_mag))
+
+    print("Geometry residual =", geometry_residual)
+
+    print("Sample force[0] =", forces[0])
+
+    print("Force residual =", force_residual)
+
+    forces_sent = [list(map(float, f[:3])) for f in forces] # Force along 3 axes
     json.dump(
         {
             "step": step,
@@ -207,9 +296,11 @@ for step in range(1, NSTEPS + 1):
         f"{float(forces[0][2]):.6e}",
     ])
 
-    # 4) Send forces to solid
+    # 4. Send forces to solid
     print("Sending forces to solid...")
     solid_conn.sendall((json.dumps(force_data) + "\n").encode())
+
+
 
 print("Coupling finished.")
 print(f"Coupling diagnostics saved at: {log_csv}")

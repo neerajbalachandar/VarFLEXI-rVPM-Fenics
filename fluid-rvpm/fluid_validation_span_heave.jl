@@ -26,19 +26,11 @@ function wing_maneuver(;
     println("Validation frequency = $freq Hz")
     println("Root amplitude       = $a_root m")
 
-    # ---------------------------------------------------------
-    # FORWARD + HEAVE VELOCITY
-    #
-    # z(t) = a cos(ωt)
-    #
-    # dz/dt = -aω sin(ωt)
-    # ---------------------------------------------------------
-
     vehicle_velocity_func(t) = begin
 
         t_phys = t * ttot
 
-        vz = -a_root * ω * sin(ω * t_phys)
+        vz = -a_root * ω * cos(ω * t_phys)
 
         [
             vehicle_velocity,
