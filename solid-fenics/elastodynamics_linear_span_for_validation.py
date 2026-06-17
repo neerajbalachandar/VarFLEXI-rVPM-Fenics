@@ -2,7 +2,6 @@ from dolfin import *
 import json
 import os
 import socket
-
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -15,20 +14,27 @@ Nsteps = int(os.getenv("COUPLING_NSTEPS", "1000"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
 
+
+
 span = float(os.getenv("SOLID_SPAN", "0.3"))
 root_chord = float(os.getenv("SOLID_ROOT_CHORD", "0.1"))
 tip_chord = float(os.getenv("SOLID_TIP_CHORD", "0.1"))
 thickness_ratio = float(os.getenv("SOLID_THICKNESS_RATIO", "0.005"))
 leading_edge_sweep = float(os.getenv("SOLID_LE_SWEEP", "0.0"))
 
+
+
 nx = int(os.getenv("SOLID_NX", "12"))
 ny = int(os.getenv("SOLID_NY", "240"))
 nz = int(os.getenv("SOLID_NZ", "6"))
+
+
 
 # Communication stations for the fluid v10 spanwise panels.
 n_span_comm = int(os.getenv("COUPLING_NSPAN_COMM", "80"))
 n_chord_comm = 1
 m_panels_comm = n_span_comm * n_chord_comm
+
 span_sampling_mode = os.getenv("COUPLING_SPAN_SAMPLING", "node-stride").strip().lower()
 span_custom_stride = os.getenv("COUPLING_SPAN_STRIDE")
 
@@ -45,7 +51,7 @@ def build_eta_span_comm(n_span_vals, ny_vals, mode):
         return eta, idx
 
     if mode == "node-stride":
-        # Example: ny=200 and n_span=4 -> indices [0, 50, 100, 150].
+        # Eg. ny=200 and n_span=4 --> indices [0, 50, 100, 150].
         stride = max(1, ny_vals // n_span_vals)
         idx = np.arange(n_span_vals, dtype=int) * stride
         idx = np.clip(idx, 0, max(ny_vals, 1))
@@ -79,6 +85,8 @@ def build_eta_span_comm(n_span_vals, ny_vals, mode):
         return eta, idx
 
     raise ValueError(f"Unsupported COUPLING_SPAN_SAMPLING='{mode}'")
+
+
 
 
 eta_span_comm, eta_span_comm_indices = build_eta_span_comm(n_span_comm, ny, span_sampling_mode)
@@ -116,6 +124,9 @@ def naca_half_thickness(xi):
 
 
 mesh = BoxMesh(Point(0.0, 0.0, -1.5e-3), Point(1.0, span, 1.5e-3), nx, ny, nz)
+
+print("hmin =", mesh.hmin())
+print("hmax =", mesh.hmax())
 
 coords = mesh.coordinates()
 min_half_t = 0.10 * root_chord * thickness_ratio / max(nz, 1)
@@ -263,6 +274,8 @@ bc = DirichletBC(
     left
 )
 
+
+print("BC DOFs =", len(bc.get_boundary_values()))
 
 def sigma(r):
     eps = sym(grad(r))
@@ -919,15 +932,53 @@ for i_step in range(Nsteps):
     )
 
 
-    b = assemble(L_form)
+    # b = assemble(L_form)
+    # if nodal_forces is not None:
+    #     ext_force_vec = ext_force_vec_template.copy()
+    #     ext_force_vec.zero()
+    #     add_nodal_forces_to_rhs(
+    #         ext_force_vec, nodal_forces, interface_node_ids, dofs_x, dofs_y, dofs_z
+    #     )
+    #     b.axpy(1.0, ext_force_vec)
+    # bc.apply(b)
+
+    # print("A Frobenius norm =", A.norm("frobenius"))
+    # print("b L2 norm =", b.norm("l2"))
+
+    # solver.solve(u.vector(), b)
+
+
+    A, b = assemble_system(a_form, L_form, bc)
+
+    print("A size =", A.size(0), A.size(1))
+
+    # for bc_i in bcs:
+    #     print(len(bc_i.get_boundary_values()))
+
     if nodal_forces is not None:
+
         ext_force_vec = ext_force_vec_template.copy()
         ext_force_vec.zero()
+
         add_nodal_forces_to_rhs(
-            ext_force_vec, nodal_forces, interface_node_ids, dofs_x, dofs_y, dofs_z
+            ext_force_vec,
+            nodal_forces,
+            interface_node_ids,
+            dofs_x,
+            dofs_y,
+            dofs_z
         )
+
         b.axpy(1.0, ext_force_vec)
-    bc.apply(b)
+
+    solver = LUSolver(A, "mumps")
+    solver.parameters["symmetric"] = True
+
+    print("A Frobenius norm =", A.norm("frobenius"))
+    print("b L2 norm =", b.norm("l2"))
+
+    print(type(solver))
+
     solver.solve(u.vector(), b)
 
     uvec = u.vector().get_local()

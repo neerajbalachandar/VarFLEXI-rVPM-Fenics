@@ -274,6 +274,10 @@ bc_theta = DirichletBC(
 
 bcs = [bc_u, bc_w, bc_theta]
 
+# Homogenous Boundary Conditions
+bc_w_hom = DirichletBC(V.sub(1), Constant(0.0), left)
+bcs_hom = [bc_u, bc_w_hom, bc_theta]
+
 
 I2 = Identity(2)
 
@@ -468,13 +472,11 @@ res = (
 
 jac = derivative(res, q, dq_trial)
 
-
-#
 # Coupled step-1 is commonly the hardest: the solid starts from rest/zero
 # displacement and suddenly receives aerodynamic loads. The original defaults
 # (1e-8/1e-7) are often unrealistically strict for this transient and can cause
 # an early abort that then cascades into the fluid side as a socket disconnect.
-#
+
 newton_atol = float(os.getenv("SOLID_NEWTON_ATOL", "2.0e-4"))
 newton_rtol = float(os.getenv("SOLID_NEWTON_RTOL", "3.0e-3"))
 newton_maxit = int(os.getenv("SOLID_NEWTON_MAXIT", "60"))
@@ -1028,6 +1030,9 @@ for i_step in range(Nsteps):
     current_time = time[i_step]
     heave_expr.t = current_time
 
+    for bc in bcs:
+        bc.apply(q.vector())
+
     line = sock_file.readline()
     if line == "":
         raise RuntimeError("Coupling server disconnected while sending force data")
@@ -1073,6 +1078,8 @@ for i_step in range(Nsteps):
     converged = False
     r0 = None
     r_rel = np.inf
+
+
     for newton_it in range(newton_maxit):
         A = assemble(jac)
         R = assemble(res)
@@ -1084,8 +1091,12 @@ for i_step in range(Nsteps):
         else:
             ramp = 1.0
         b.axpy(ramp, ext_force_vec)
-        for bc in bcs:
+        # for bc in bcs:
+        #     bc.apply(A, b)
+
+        for bc in bcs_hom:
             bc.apply(A, b)
+
         r_norm = b.norm("l2")
         if r0 is None:
             r0 = max(r_norm, 1.0e-16)
@@ -1108,6 +1119,9 @@ for i_step in range(Nsteps):
         )
         
         q.vector().apply("insert")
+
+        for bc in bcs:
+            bc.apply(q.vector())
 
         print(
             f"Step {i_step+1}, "
