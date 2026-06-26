@@ -154,8 +154,8 @@ span_sampling_mode = lowercase(strip(get(ENV, "COUPLING_SPAN_SAMPLING", "node-st
 solid_ny_for_sampling = parse(Int, get(ENV, "SOLID_NY", "240"))
 custom_span_stride_raw = get(ENV, "COUPLING_SPAN_STRIDE", "")
 
-ttot = parse(Float64, get(ENV, "COUPLING_TTOT", "0.30"))
-nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "1000"))
+ttot = parse(Float64, get(ENV, "COUPLING_TTOT", "2.0"))
+nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "6600"))
 dt = ttot / nsteps
 
 p_per_step = parse(Int, get(ENV, "FLUID_P_PER_STEP", "1"))
@@ -168,8 +168,8 @@ use_unsteady_shedding = true
 unsteady_shedcrit = 0.0
 vlm_rlx = 0.35
 
-geom_relax = parse(Float64, get(ENV, "FLUID_GEOM_RELAX", "1.0"))
-force_relax = parse(Float64, get(ENV, "FLUID_FORCE_RELAX", "1.0"))
+geom_relax = parse(Float64, get(ENV, "FLUID_GEOM_RELAX", "0.8"))
+force_relax = parse(Float64, get(ENV, "FLUID_FORCE_RELAX", "0.8"))
 disp_scale_x = parse(Float64, get(ENV, "FLUID_DISP_SCALE_X", "1.0"))
 disp_scale_y = parse(Float64, get(ENV, "FLUID_DISP_SCALE_Y", "1.0"))
 disp_scale_z = parse(Float64, get(ENV, "FLUID_DISP_SCALE_Z", "1.0"))

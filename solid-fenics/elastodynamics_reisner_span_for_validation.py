@@ -10,8 +10,8 @@ parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
 
-T = float(os.getenv("COUPLING_TTOT", "0.30"))
-Nsteps = int(os.getenv("COUPLING_NSTEPS", "1000"))
+T = float(os.getenv("COUPLING_TTOT", "2.0"))
+Nsteps = int(os.getenv("COUPLING_NSTEPS", "6600"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
 
@@ -178,7 +178,7 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0, shape=(2, 2))
 
 t_aero = Function(Vt, name="AerodynamicTraction")
 
-E = float(os.getenv("SOLID_E", "1.0e8"))
+E = float(os.getenv("SOLID_E", "3.0e8"))
 nu = float(os.getenv("SOLID_NU", "0.35"))
 rho_s = float(os.getenv("SOLID_RHO", "1100.0"))
 rho = Constant(rho_s)
@@ -477,9 +477,9 @@ jac = derivative(res, q, dq_trial)
 # (1e-8/1e-7) are often unrealistically strict for this transient and can cause
 # an early abort that then cascades into the fluid side as a socket disconnect.
 
-newton_atol = float(os.getenv("SOLID_NEWTON_ATOL", "2.0e-4"))
-newton_rtol = float(os.getenv("SOLID_NEWTON_RTOL", "3.0e-3"))
-newton_maxit = int(os.getenv("SOLID_NEWTON_MAXIT", "60"))
+newton_atol = float(os.getenv("SOLID_NEWTON_ATOL", "1.0e-6"))
+newton_rtol = float(os.getenv("SOLID_NEWTON_RTOL", "1.0e-5"))
+newton_maxit = int(os.getenv("SOLID_NEWTON_MAXIT", "80"))
 dq_newton = Function(V)
 linear_solver = LUSolver("mumps")
 

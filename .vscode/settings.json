@@ -1,5 +1,5 @@
 {
-    "julia.environmentPath": "/home/dysco/FLOWUnsteady/VarFLEXI-rVPM-Fenics/fluid-rvpm",
+    "julia.environmentPath": "/home/dysco/FLOWUnsteady",
     "ROS2.distro": "jazzy",
     "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.defaultPackageManager": "ms-python.python:conda",
