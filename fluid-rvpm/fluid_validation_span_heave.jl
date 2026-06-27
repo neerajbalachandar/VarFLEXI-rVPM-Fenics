@@ -5,6 +5,7 @@ import FLOWUnsteady as uns
 import FLOWVLM as vlm
 import FLOWVPM as vpm
 using Dates
+using Statistics
 
 function wing_maneuver(;
     disp_plot=true,
@@ -829,21 +830,6 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     # Shedding health diagnostic (helps catch end-of-run shedding errors).
     np = vpm.get_np(PFIELD)
 
-    # ------------------------------------
-    # Wake Length
-    # ------------------------------------
-
-    wakeLength = 0.0
-
-    for p in PFIELD.particles
-
-        wakeLength = max(
-            wakeLength,
-            norm(p.X)
-        )
-
-    end
-
     if step == 1 || step % 20 == 0 || step == nsteps
         println("Fluid step $step/$nsteps: Particles=$np")
     end
@@ -873,6 +859,8 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             )),
         )
         flush(force_trace_io)
+
+    end
 
     write(sock, JSON.json(Dict(
         "step" => step,
@@ -927,7 +915,6 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             Ct,",",
             gammaMax,",",
             gammaMean,",",
-            wakeLength,",",
             force_res,",",
             geom_res,",",
             cpu_time
