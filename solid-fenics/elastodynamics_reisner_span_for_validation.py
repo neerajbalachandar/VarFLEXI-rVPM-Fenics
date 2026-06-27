@@ -2,23 +2,25 @@ from dolfin import *
 import json
 import os
 import socket
+import csv
 
 import numpy as np
 from scipy.spatial import cKDTree
+from time import perf_counter
 
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
 
-T = float(os.getenv("COUPLING_TTOT", "2.0"))
-Nsteps = int(os.getenv("COUPLING_NSTEPS", "6600"))
+T = float(os.getenv("COUPLING_TTOT", "46"))
+Nsteps = int(os.getenv("COUPLING_NSTEPS", "9000"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
 
 span = float(os.getenv("SOLID_SPAN", "0.3"))
 root_chord = float(os.getenv("SOLID_ROOT_CHORD", "0.1"))
 tip_chord = float(os.getenv("SOLID_TIP_CHORD", "0.1"))
-thickness_ratio = float(os.getenv("SOLID_THICKNESS_RATIO", "0.005"))
+thickness_ratio = float(os.getenv("SOLID_THICKNESS_RATIO", "0.01"))
 leading_edge_sweep = float(os.getenv("SOLID_LE_SWEEP", "0.0"))
 
 # For 2D Reissner-Mindlin plate: only chord and span directions (no thickness discretization)
@@ -178,11 +180,11 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0, shape=(2, 2))
 
 t_aero = Function(Vt, name="AerodynamicTraction")
 
-E = float(os.getenv("SOLID_E", "3.0e8"))
+E = float(os.getenv("SOLID_E", "5.0e9"))
 nu = float(os.getenv("SOLID_NU", "0.35"))
 rho_s = float(os.getenv("SOLID_RHO", "1100.0"))
 rho = Constant(rho_s)
-eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.01")))
+eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.02")))
 eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-6")))
 kappa_shear = Constant(5.0 / 6.0)  # Shear correction factor for Reissner-Mindlin
 
@@ -215,7 +217,7 @@ q_old = Function(V)
 v_old = Function(V)
 a_old = Function(V)
 
-Uinf = 4.43
+Uinf = 0.30
 chord = 0.1
 
 kG = 1.82
@@ -479,12 +481,12 @@ jac = derivative(res, q, dq_trial)
 
 newton_atol = float(os.getenv("SOLID_NEWTON_ATOL", "1.0e-6"))
 newton_rtol = float(os.getenv("SOLID_NEWTON_RTOL", "1.0e-5"))
-newton_maxit = int(os.getenv("SOLID_NEWTON_MAXIT", "80"))
+newton_maxit = int(os.getenv("SOLID_NEWTON_MAXIT", "120"))
 dq_newton = Function(V)
 linear_solver = LUSolver("mumps")
 
 # Optional ramp on the applied coupling forces during the Newton iterations.
-force_ramp_iters = int(os.getenv("SOLID_FORCE_RAMP_ITERS", "8"))
+force_ramp_iters = int(os.getenv("SOLID_FORCE_RAMP_ITERS", "20"))
 
 
 def local_project(v_expr, Vout, u_out=None):
@@ -867,6 +869,111 @@ sig = Function(Vsig, name="MembraneStress")
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 out_dir = os.path.join(repo_root, "results", "solid", "v18_reissner_mindlin_plate")
 os.makedirs(out_dir, exist_ok=True)
+
+# =====================================================================
+#                    DIAGNOSTICS AND RESTART SETUP
+# =====================================================================
+
+# -----------------------
+# Restart settings
+# -----------------------
+
+restart_interval = int(os.getenv("SOLID_RESTART_INTERVAL", "100"))
+
+restart_dir = os.path.join(out_dir, "restart")
+os.makedirs(restart_dir, exist_ok=True)
+
+# -----------------------
+# Diagnostics settings
+# -----------------------
+
+diagnostics_dir = os.path.join(out_dir, "diagnostics")
+os.makedirs(diagnostics_dir, exist_ok=True)
+
+diagnostics_file = os.path.join(
+    diagnostics_dir,
+    "solid_diagnostics.csv"
+)
+
+# Flush every timestep
+flush_every = 1
+
+# =====================================================================
+# Open diagnostics file BEFORE simulation starts
+# =====================================================================
+
+diag_fp = open(diagnostics_file, "w", newline="")
+
+diag_writer = csv.writer(diag_fp)
+
+diag_writer.writerow([
+    "Step",
+    "Time",
+
+    # -----------------------------
+    # Displacements
+    # -----------------------------
+    "Root_Uz",
+    "Mid_Uz",
+    "Tip_Uz",
+
+    # -----------------------------
+    # Velocities
+    # -----------------------------
+    "Root_Vz",
+    "Mid_Vz",
+    "Tip_Vz",
+
+    # -----------------------------
+    # Accelerations
+    # -----------------------------
+    "Root_Az",
+    "Mid_Az",
+    "Tip_Az",
+
+    # -----------------------------
+    # Energies
+    # -----------------------------
+    "ElasticEnergy",
+    "KineticEnergy",
+    "DampingEnergy",
+    "TotalEnergy",
+
+    "DeltaE",
+    "DeltaE_over_E0",
+
+    # -----------------------------
+    # Work
+    # -----------------------------
+    "FluidWork",
+    "StructuralWork",
+
+    "CumFluidWork",
+    "CumStructuralWork",
+
+    "WorkError",
+
+    # -----------------------------
+    # Newton
+    # -----------------------------
+    "NewtonIterations",
+    "NewtonResidual",
+
+    # -----------------------------
+    # Forces
+    # -----------------------------
+    "ForceNorm",
+
+    # -----------------------------
+    # CPU
+    # -----------------------------
+    "WallTime"
+])
+
+diag_fp.flush()
+os.fsync(diag_fp.fileno())
+
+
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
 xdmf_file = XDMFFile(xdmf_path)
 xdmf_file.parameters["flush_output"] = True
@@ -972,9 +1079,29 @@ ext_force_vec_template = q.vector().copy()
 ext_force_vec_template.zero()
 
 time = np.linspace(0.0, T, Nsteps + 1)
-u_tip = np.zeros((Nsteps + 1,), dtype=float)
-u_root = np.zeros((Nsteps + 1,), dtype=float)
-energies = np.zeros((Nsteps + 1, 4), dtype=float)
+
+u_root = np.zeros(Nsteps+1)
+u_mid  = np.zeros(Nsteps+1)
+u_tip  = np.zeros(Nsteps+1)
+
+v_root = np.zeros(Nsteps+1)
+v_mid  = np.zeros(Nsteps+1)
+v_tip  = np.zeros(Nsteps+1)
+
+a_root = np.zeros(Nsteps+1)
+a_mid  = np.zeros(Nsteps+1)
+a_tip  = np.zeros(Nsteps+1)
+
+# energies = np.zeros((Nsteps + 1, 4), dtype=float)
+
+elastic_energy = np.zeros(Nsteps+1)
+kinetic_energy = np.zeros(Nsteps+1)
+damping_energy = np.zeros(Nsteps+1)
+total_energy   = np.zeros(Nsteps+1)
+
+delta_energy = np.zeros(Nsteps+1)
+delta_energy_ratio = np.zeros(Nsteps+1)
+
 E_damp_acc = 0.0
 force_relax = 1.0
 forces_prev = None
@@ -982,10 +1109,24 @@ work_rel_errors = np.full((Nsteps,), np.nan, dtype=float)
 work_Wf = np.full((Nsteps,), np.nan, dtype=float)
 work_Ws = np.full((Nsteps,), np.nan, dtype=float)
 
+fluid_work = np.zeros(Nsteps+1)
+structural_work = np.zeros(Nsteps+1)
+
+cum_fluid_work_array = np.zeros(Nsteps+1)
+cum_structural_work_array = np.zeros(Nsteps+1)
+
+work_error = np.zeros(Nsteps+1)
+
+newton_iterations = np.zeros(Nsteps+1, dtype=int)
+
+newton_residual = np.zeros(Nsteps+1)
+force_norm = np.zeros(Nsteps+1)
+
 # tip_x = x_leading_edge_at(span) + eta_cp * chord_at(span)
 # tip_y = span - 1.0e-8
 tip_x = 0.075      # 75% chord
 tip_y = 0.30       # span tip
+
 
 
 zero_payload = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
@@ -1024,7 +1165,62 @@ print("Initial zero geometry sent.")
 
 # q_pvd << (...)
 
+
+def save_restart(step, t, q_old, v_old, a_old):
+
+    q_old.vector().apply("insert")
+    v_old.vector().apply("insert")
+    a_old.vector().apply("insert")
+
+    File(os.path.join(restart_dir, "q_old.xml")) << q_old
+    File(os.path.join(restart_dir, "v_old.xml")) << v_old
+    File(os.path.join(restart_dir, "a_old.xml")) << a_old
+
+    info = {
+        "step": int(step),
+        "time": float(t)
+    }
+
+    with open(os.path.join(restart_dir, "restart.json"), "w") as fp:
+        json.dump(info, fp, indent=4)
+
+# =====================================================================
+#               CUMULATIVE DIAGNOSTICS
+# =====================================================================
+
+cum_fluid_work = 0.0
+cum_structural_work = 0.0
+
+E0 = None
+
+simulation_walltime = 0.0
+
+
+def save_restart(step,
+                 current_time,
+                 q_old,
+                 v_old,
+                 a_old):
+
+    File(os.path.join(restart_dir, "q_old.xml")) << q_old
+    File(os.path.join(restart_dir, "v_old.xml")) << v_old
+    File(os.path.join(restart_dir, "a_old.xml")) << a_old
+
+    restart_info = {
+        "step": int(step),
+        "time": float(current_time)
+    }
+
+    with open(os.path.join(restart_dir,
+                           "restart.json"), "w") as fp:
+
+        json.dump(restart_info,
+                  fp,
+                  indent=4)
+        
+
 for i_step in range(Nsteps):
+    step_start = perf_counter()
     print(f"Solid step {i_step + 1}/{Nsteps}: waiting for force...")
     
     current_time = time[i_step]
@@ -1057,6 +1253,8 @@ for i_step in range(Nsteps):
     else:
         forces_eff = force_relax * forces + (1.0 - force_relax) * forces_prev
     forces_prev = forces_eff.copy()
+
+    force_norm[i_step+1] = np.linalg.norm(forces_eff)
 
     nodal_forces = None
     Fs_coeff = None
@@ -1137,6 +1335,12 @@ for i_step in range(Nsteps):
             f"atol={newton_atol:.2e}, rtol={newton_rtol:.2e}, "
             f"maxit={newton_maxit}, ramp_iters={force_ramp_iters}"
         )
+    # ---------------------------------------
+    # Newton diagnostics
+    # ---------------------------------------
+
+    newton_iterations[i_step+1] = newton_it + 1
+    newton_residual[i_step+1] = r_norm
     
 
     if work_conservative_mode and nodal_forces is not None and Fs_coeff is not None:
@@ -1155,6 +1359,18 @@ for i_step in range(Nsteps):
         work_rel_errors[i_step] = rel_work_err
         work_Wf[i_step] = Wf
         work_Ws[i_step] = Ws
+
+        cum_fluid_work += Wf
+        cum_structural_work += Ws
+
+        cum_fluid_work_array[i_step+1] = cum_fluid_work
+        cum_structural_work_array[i_step+1] = cum_structural_work
+
+        fluid_work[i_step+1] = Wf
+        structural_work[i_step+1] = Ws
+
+        work_error[i_step+1] = rel_work_err
+
         if i_step == 0 or (i_step + 1) % 20 == 0:
             print(
                 f"Work audit step {i_step + 1}: "
@@ -1162,6 +1378,20 @@ for i_step in range(Nsteps):
             )
 
     update_fields(q, q_old, v_old, a_old)
+    if ((i_step+1)%restart_interval)==0:
+
+        save_restart(
+            i_step+1,
+            t,
+            q_old,
+            v_old,
+            a_old
+        )
+
+        diag_fp.flush()
+        os.fsync(diag_fp.fileno())
+
+
     t = time[i_step + 1]
 
     xdmf_file.write(q, t)
@@ -1178,7 +1408,17 @@ for i_step in range(Nsteps):
     E_kin = 0.5 * assemble(m_form(v_old, v_old))
     E_damp_acc += dt_value * assemble(c_form(v_old, v_old))
     E_tot = E_elas + E_kin + E_damp_acc
-    energies[i_step + 1, :] = np.array([E_elas, E_kin, E_damp_acc, E_tot])
+    # energies[i_step + 1, :] = np.array([E_elas, E_kin, E_damp_acc, E_tot])
+    elastic_energy[i_step+1] = E_elas
+    kinetic_energy[i_step+1] = E_kin
+    damping_energy[i_step+1] = E_damp_acc
+    total_energy[i_step+1] = E_tot
+
+    if E0 is None:
+        E0 = max(E_tot,1e-16)
+
+    delta_energy[i_step+1] = E_tot-E0
+    delta_energy_ratio[i_step+1] = (E_tot-E0)/E0
 
     # Get tip transverse displacement
     try:
@@ -1191,12 +1431,53 @@ for i_step in range(Nsteps):
         theta_y = vals[4]
 
         u_tip[i_step + 1] = float(w_eval)
+        try:
+        
+            vals_v = v_old(Point(tip_x, tip_y))
+
+            v_tip[i_step+1] = float(vals_v[2])
+
+        except RuntimeError:
+        
+            v_tip[i_step+1] = 0.0
+
+        try:
+
+            vals_a = a_old(Point(tip_x, tip_y))
+
+            a_tip[i_step+1] = float(vals_a[2])
+
+        except RuntimeError:
+        
+            a_tip[i_step+1] = 0.0
+    
     except RuntimeError:
         u_tip[i_step + 1] = 0.0
 
 
     root_x = 0.075
     root_y = 0.0
+
+    mid_x = 0.075
+    mid_y = 0.15
+
+    try:
+
+        vals_mid = q(Point(mid_x, mid_y))
+        u_mid[i_step+1] = float(vals_mid[2])
+
+        vals_mid_v = v_old(Point(mid_x, mid_y))
+        v_mid[i_step+1] = float(vals_mid_v[2])
+
+        vals_mid_a = a_old(Point(mid_x, mid_y))
+        a_mid[i_step+1] = float(vals_mid_a[2])
+
+    except RuntimeError:
+
+        u_mid[i_step+1] = 0.0
+        v_mid[i_step+1] = 0.0
+        a_mid[i_step+1] = 0.0
+
     # root_z = 0.0
 
     # try:
@@ -1204,13 +1485,78 @@ for i_step in range(Nsteps):
     # except RuntimeError:
     #     u_root[i_step+1] = float(vals[2])
 
+    # try:
+    #     vals_root = q(Point(root_x, root_y))
+
+    #     u_root[i_step + 1] = float(vals_root[2])
+
+    # except RuntimeError:
+    #     u_root[i_step + 1] = 0.0
+
     try:
+
         vals_root = q(Point(root_x, root_y))
-
-        u_root[i_step + 1] = float(vals_root[2])
-
+        u_root[i_step+1] = float(vals_root[2])
+    
+        vals_root_v = v_old(Point(root_x, root_y))
+        v_root[i_step+1] = float(vals_root_v[2])
+    
+        vals_root_a = a_old(Point(root_x, root_y))
+        a_root[i_step+1] = float(vals_root_a[2])
+    
     except RuntimeError:
-        u_root[i_step + 1] = 0.0
+    
+        u_root[i_step+1] = 0.0
+        v_root[i_step+1] = 0.0
+        a_root[i_step+1] = 0.0
+    
+    diag_writer.writerow([
+
+        i_step+1,
+        t,
+
+        u_root[i_step+1],
+        u_mid[i_step+1],
+        u_tip[i_step+1],
+
+        v_root[i_step+1],
+        v_mid[i_step+1],
+        v_tip[i_step+1],
+
+        a_root[i_step+1],
+        a_mid[i_step+1],
+        a_tip[i_step+1],
+
+        elastic_energy[i_step+1],
+        kinetic_energy[i_step+1],
+        damping_energy[i_step+1],
+        total_energy[i_step+1],
+
+        delta_energy[i_step+1],
+        delta_energy_ratio[i_step+1],
+
+        fluid_work[i_step+1],
+        structural_work[i_step+1],
+
+        cum_fluid_work_array[i_step+1],
+        cum_structural_work_array[i_step+1],
+
+        work_error[i_step+1],
+
+        newton_iterations[i_step+1],
+        newton_residual[i_step+1],
+
+        force_norm[i_step+1],
+
+        simulation_walltime
+
+    ])
+
+    if ((i_step+1)%flush_every)==0:
+
+        diag_fp.flush()
+
+        os.fsync(diag_fp.fileno())
 
     if i_step < Nsteps - 1:
         interface_disp_cur = get_nodal_displacements_plate(
@@ -1264,7 +1610,9 @@ for i_step in range(Nsteps):
         if DEBUG_IO and (i_step == 0 or (i_step + 1) % 20 == 0):
             print(f"SEND step {i_step + 1} first LE/TE = {u_le_arr[0, :].tolist()} / {u_te_arr[0, :].tolist()}")
             print(f"SEND step {i_step + 1} last  LE/TE = {u_le_arr[-1, :].tolist()} / {u_te_arr[-1, :].tolist()}")
-
+        
+        simulation_walltime = perf_counter()-step_start
+        
         msg_geo = json.dumps(
             {
                 "step": i_step + 1,
@@ -1293,24 +1641,33 @@ print("Solid solver finished.")
 print(f"Solid field outputs: {xdmf_path}")
 print(f"Solid VTK outputs: {q_pvd_path}, {sig_pvd_path}, {mesh_pvd_path}")
 
-diag_csv = os.path.join(out_dir, "solid_v18_diagnostics.csv")
+# diag_csv = os.path.join(out_dir, "solid_v18_diagnostics.csv")
 
-with open(diag_csv, "w") as fp:
-    fp.write(
-        "step,time,u_tip,E_elas,E_kin,E_damp,E_tot,"
-        "work_Wf,work_Ws,work_rel_error\n"
-    )
+# with open(diag_csv, "w") as fp:
+#     # fp.write(
+#     #     "step,time,u_tip,E_elas,E_kin,E_damp,E_tot,"
+#     #     "work_Wf,work_Ws,work_rel_error\n"
+#     # )
+#     fp.write(
+#         "step,time,u_tip,v_tip,a_tip,"
+#         "E_elas,E_kin,E_damp,E_tot,"
+#         "work_Wf,work_Ws,work_rel_error\n"
+#     )
 
-    for k_idx in range(Nsteps):
-        fp.write(
-            f"{k_idx + 1},"
-            f"{time[k_idx + 1]:.12e},"
-            f"{u_tip[k_idx + 1]:.12e},"
-            f"{energies[k_idx + 1, 0]:.12e},"
-            f"{energies[k_idx + 1, 1]:.12e},"
-            f"{energies[k_idx + 1, 2]:.12e},"
-            f"{energies[k_idx + 1, 3]:.12e},"
-            f"{work_Wf[k_idx]:.12e},"
-            f"{work_Ws[k_idx]:.12e},"
-            f"{work_rel_errors[k_idx]:.12e}\n"
-        )
+#     for k_idx in range(Nsteps):
+#         fp.write(
+#             f"{k_idx+1},"
+#             f"{time[k_idx+1]:.12e},"
+#             f"{u_tip[k_idx+1]:.12e},"
+#             f"{v_tip[k_idx+1]:.12e},"
+#             f"{a_tip[k_idx+1]:.12e},"
+#             f"{energies[k_idx+1,0]:.12e},"
+#             f"{energies[k_idx+1,1]:.12e},"
+#             f"{energies[k_idx+1,2]:.12e},"
+#             f"{energies[k_idx+1,3]:.12e},"
+#             f"{work_Wf[k_idx]:.12e},"
+#             f"{work_Ws[k_idx]:.12e},"
+#             f"{work_rel_errors[k_idx]:.12e}\n"
+#         )
+
+diag_fp.close()

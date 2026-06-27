@@ -4,12 +4,12 @@ using LinearAlgebra
 import FLOWUnsteady as uns
 import FLOWVLM as vlm
 import FLOWVPM as vpm
+using Dates
 
 function wing_maneuver(;
     disp_plot=true,
     vehicle_velocity::Real=4.43,
-    angle_of_attack::Real=0.0
-)
+    angle_of_attack::Real=0.0)
 
     chord = 0.1
 
@@ -63,8 +63,6 @@ function wing_maneuver(;
 
     return maneuver
 end
-
-
 
 
 # Keep FLOWVLM robust against colinearity/typing edge cases.
@@ -130,8 +128,8 @@ end
 
 # ---------------------------------- CONFIG ----------------------------------
 AOA = parse(Float64, get(ENV, "FLUID_AOA_DEG", "0.0"))
-magVinf = parse(Float64, get(ENV, "FLUID_VINF", "4.43"))
-rho = parse(Float64, get(ENV, "FLUID_RHO", "1.225"))
+magVinf = parse(Float64, get(ENV, "FLUID_VINF", "0.30"))
+rho = parse(Float64, get(ENV, "FLUID_RHO", "998"))
 DEBUG_IO = lowercase(get(ENV, "COUPLING_DEBUG_IO", "0")) ∉ ("0", "false", "no")
 
 # Match solid coordinate system: x=chord, y=span, z=normal displacement.
@@ -154,8 +152,8 @@ span_sampling_mode = lowercase(strip(get(ENV, "COUPLING_SPAN_SAMPLING", "node-st
 solid_ny_for_sampling = parse(Int, get(ENV, "SOLID_NY", "240"))
 custom_span_stride_raw = get(ENV, "COUPLING_SPAN_STRIDE", "")
 
-ttot = parse(Float64, get(ENV, "COUPLING_TTOT", "2.0"))
-nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "6600"))
+ttot = parse(Float64, get(ENV, "COUPLING_TTOT", "46"))
+nsteps = parse(Int, get(ENV, "COUPLING_NSTEPS", "9000"))
 dt = ttot / nsteps
 
 p_per_step = parse(Int, get(ENV, "FLUID_P_PER_STEP", "1"))
@@ -173,10 +171,10 @@ force_relax = parse(Float64, get(ENV, "FLUID_FORCE_RELAX", "0.8"))
 disp_scale_x = parse(Float64, get(ENV, "FLUID_DISP_SCALE_X", "1.0"))
 disp_scale_y = parse(Float64, get(ENV, "FLUID_DISP_SCALE_Y", "1.0"))
 disp_scale_z = parse(Float64, get(ENV, "FLUID_DISP_SCALE_Z", "1.0"))
-wake_remove_every = parse(Int, get(ENV, "FLUID_WAKE_REMOVE_EVERY", "100"))
-wake_sphere_factor = parse(Float64, get(ENV, "FLUID_WAKE_SPHERE_FACTOR", "200.0"))
-wake_strength_min_factor = parse(Float64, get(ENV, "FLUID_WAKE_STRENGTH_MIN_FACTOR", "1.0e-8"))
-wake_strength_max_factor = parse(Float64, get(ENV, "FLUID_WAKE_STRENGTH_MAX_FACTOR", "50.0"))
+wake_remove_every = parse(Int, get(ENV, "FLUID_WAKE_REMOVE_EVERY", "20"))
+wake_sphere_factor = parse(Float64, get(ENV, "FLUID_WAKE_SPHERE_FACTOR", "25.0"))
+wake_strength_min_factor = parse(Float64, get(ENV, "FLUID_WAKE_STRENGTH_MIN_FACTOR", "1.0e-6"))
+wake_strength_max_factor = parse(Float64, get(ENV, "FLUID_WAKE_STRENGTH_MAX_FACTOR", "30.0"))
 wake_sigma_min_factor = parse(Float64, get(ENV, "FLUID_WAKE_SIGMA_MIN_FACTOR", "1.0e-3"))
 wake_sigma_max_factor = parse(Float64, get(ENV, "FLUID_WAKE_SIGMA_MAX_FACTOR", "50.0"))
 
@@ -277,7 +275,8 @@ save_path = normpath(joinpath(repo_root, "results", "fluid", "v9"))
 run_name = "fluid_v9"
 mkpath(save_path)
 
-max_particles = Int((nsteps + 1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step + 1) + p_per_step))
+# max_particles = Int((nsteps + 1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step + 1) + p_per_step))
+max_particles = 400000
 omit_shedding_rows = Int[]
 
 rmv_strength = 2 * 2 / max(p_per_step, 1) * dt / (1 / 12)
@@ -292,7 +291,7 @@ wake_treatment_sigma = uns.remove_particles_sigma(
 )
 
 wake_treatment_sphere = uns.remove_particles_sphere(
-    (wake_sphere_factor * b)^2, 1; Xoff=[0.5 * b, 0.0, 0.0]
+    (wake_sphere_factor * root_chord)^2, 1; Xoff=[0.5 * b, 0.0, 0.0]
 )
 
 wake_treatment = uns.concatenate(
@@ -596,6 +595,34 @@ geom_res_hist = Float64[]
 force_trace_path = joinpath(save_path, run_name * "_force_payload_history.jsonl")
 force_trace_io = open(force_trace_path, "w")
 
+# diag_path = joinpath(save_path, run_name * "_fluid_diagnostics.csv")
+
+# diag_io = open(diag_path,"w")
+
+# println(diag_io,
+# "Step,Time,
+# Particles,
+# Lift,Drag,
+# ForceNorm,
+# Ct,
+# GammaMax,GammaMean,
+# CPUtime")
+
+
+
+using DelimitedFiles
+
+diag_file = joinpath(save_path, run_name * "_fluid_diagnostics.csv")
+
+diag_io = open(diag_file, "w")
+
+println(diag_io,
+"step,time,nParticles,lift,drag,moment,
+forceNorm,
+gammaMax,gammaMean,
+sigmaMax,sigmaMean,
+cpuTime")
+
 # ---------------- VALIDATION HISTORY ----------------
 
 time_history = Float64[]
@@ -721,12 +748,20 @@ step_ref = Ref(0)
 use_ftot_force = Ref(true)
 
 function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
+
+    step_cpu = time_ns()
+
     step_ref[] += 1
     step = step_ref[]
 
     ensure_gamma!(wing, m_span)
     gamma_w = wing.sol["Gamma"]
 
+    gammaMax = maximum(abs.(gamma_w))
+    gammaMean = mean(abs.(gamma_w))
+
+    geom_res = 0.0
+    
     force_out = Vector{Vector{Float64}}(undef, m_span)
     prev_snapshot = copy(forces_prev)
 
@@ -771,7 +806,13 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         fy = force_relax * fy_raw + (1 - force_relax) * forces_prev[i, 2]
         fz = force_relax * fz_raw + (1 - force_relax) * forces_prev[i, 3]
 
-        # -------------------------------------------------
+        forces_prev[i, 1] = fx
+        forces_prev[i, 2] = fy
+        forces_prev[i, 3] = fz
+        force_out[i] = [fx, fy, fz]
+    end
+
+    # -------------------------------------------------
         # TOTAL THRUST
         # -------------------------------------------------
 
@@ -784,35 +825,54 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         push!(thrust_history, total_thrust)
         push!(Ct_history, Ct)
 
-        forces_prev[i, 1] = fx
-        forces_prev[i, 2] = fy
-        forces_prev[i, 3] = fz
-        force_out[i] = [fx, fy, fz]
-    end
 
     # Shedding health diagnostic (helps catch end-of-run shedding errors).
     np = vpm.get_np(PFIELD)
+
+    # ------------------------------------
+    # Wake Length
+    # ------------------------------------
+
+    wakeLength = 0.0
+
+    for p in PFIELD.particles
+
+        wakeLength = max(
+            wakeLength,
+            norm(p.X)
+        )
+
+    end
+
     if step == 1 || step % 20 == 0 || step == nsteps
-        println("Fluid step $step/$nsteps: Particles=$np, sample force=$(force_out[1])")
+        println("Fluid step $step/$nsteps: Particles=$np")
     end
 
     force_mat = reduce(vcat, (reshape(force_out[k], 1, 3) for k in 1:length(force_out)))
+
+    lift = sum(force_mat[:,3])
+
+    drag = -sum(force_mat[:,1])
+    
+    forceNorm = norm(force_mat)
+
     force_res = norm(force_mat - prev_snapshot) / max(norm(force_mat), 1.0e-16)
     push!(step_hist, step)
     push!(force_res_hist, force_res)
 
-    println(
-        force_trace_io,
-        JSON.json(Dict(
-            "step" => step,
-            "n_span" => m_span,
-            "n_chord" => 1,
-            "indexing" => "span-major",
-            "force" => force_out,
-            "particles" => np,
-        )),
-    )
-    flush(force_trace_io)
+    if step % 10 == 0
+        println(
+            force_trace_io,
+            JSON.json(Dict(
+                "step" => step,
+                "n_span" => m_span,
+                "n_chord" => 1,
+                "indexing" => "span-major",
+                "force" => force_out,
+                "particles" => np,
+            )),
+        )
+        flush(force_trace_io)
 
     write(sock, JSON.json(Dict(
         "step" => step,
@@ -854,6 +914,27 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         push!(geom_res_hist, geom_res)
     end
 
+    cpu_time = (time_ns()-step_cpu)/1e9
+
+    println(diag_io,
+        string(
+            step,",",
+            T,",",
+            np,",",
+            lift,",",
+            drag,",",
+            forceNorm,",",
+            Ct,",",
+            gammaMax,",",
+            gammaMean,",",
+            wakeLength,",",
+            force_res,",",
+            geom_res,",",
+            cpu_time
+        )
+    )
+
+    flush(diag_io)
     return step >= nsteps
 end
 
@@ -880,7 +961,7 @@ uns.run_simulation(simulation, nsteps;
     run_name=run_name,
     create_savepath=false,
     prompt=false,
-    nsteps_save=1,
+    nsteps_save=20,
     save_horseshoes=true
 )
 
@@ -918,6 +999,7 @@ open(diag_path, "w") do io
     end
 end
 
+close(diag_io)
 close(sock)
 close(force_trace_io)
 println("Fluid v9 finished.")
