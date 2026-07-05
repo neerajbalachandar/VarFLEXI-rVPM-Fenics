@@ -2,23 +2,25 @@ from dolfin import *
 import json
 import os
 import socket
+import csv
 
 import numpy as np
 from scipy.spatial import cKDTree
+from time import perf_counter
 
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
 
-T = float(os.getenv("COUPLING_TTOT", "5.0"))
-Nsteps = int(os.getenv("COUPLING_NSTEPS", "1000"))
+T = float(os.getenv("COUPLING_TTOT", "46"))
+Nsteps = int(os.getenv("COUPLING_NSTEPS", "9000"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
 
-span = float(os.getenv("SOLID_SPAN", "0.8"))
-root_chord = float(os.getenv("SOLID_ROOT_CHORD", "0.12"))
-tip_chord = float(os.getenv("SOLID_TIP_CHORD", "0.12"))
-thickness_ratio = float(os.getenv("SOLID_THICKNESS_RATIO", "0.12"))
+span = float(os.getenv("SOLID_SPAN", "0.3"))
+root_chord = float(os.getenv("SOLID_ROOT_CHORD", "0.1"))
+tip_chord = float(os.getenv("SOLID_TIP_CHORD", "0.1"))
+thickness_ratio = float(os.getenv("SOLID_THICKNESS_RATIO", "0.01"))
 leading_edge_sweep = float(os.getenv("SOLID_LE_SWEEP", "0.0"))
 
 # For 2D Reissner-Mindlin plate: only chord and span directions (no thickness discretization)
@@ -178,12 +180,12 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0, shape=(2, 2))
 
 t_aero = Function(Vt, name="AerodynamicTraction")
 
-E = float(os.getenv("SOLID_E", "6.8e10"))
+E = float(os.getenv("SOLID_E", "5.0e9"))
 nu = float(os.getenv("SOLID_NU", "0.35"))
-rho_s = float(os.getenv("SOLID_RHO", "1600.0"))
+rho_s = float(os.getenv("SOLID_RHO", "1100.0"))
 rho = Constant(rho_s)
-eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.8")))
-eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-4")))
+eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.02")))
+eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-6")))
 kappa_shear = Constant(5.0 / 6.0)  # Shear correction factor for Reissner-Mindlin
 
 alpha_m = Constant(0.10)
@@ -198,8 +200,8 @@ print(
 )
 print(f"Time setup: T={T} s, Nsteps={Nsteps}, dt={dt_value}")
 print(
-    f"Force transfer: common-refinement overlap operator, panels={n_span_comm}, "
-    f"solid_basis=CG1"
+    f"Force transfer: compact Wendland C2 RBF, radius={rbf_radius:.4e} m, "
+    f"neighbors={rbf_neighbors}"
 )
 print(
     f"Plate shear correction kappa={float(kappa_shear)}"
@@ -215,11 +217,69 @@ q_old = Function(V)
 v_old = Function(V)
 a_old = Function(V)
 
+Uinf = 0.30
+chord = 0.1
+
+kG = 1.82
+
+freq = kG * Uinf / (np.pi * chord)
+
+omega = 2.0 * np.pi * freq
+
+a_root = 0.175 * chord
+
+# zero= Constant((0.0, 0.0, 0.0))
+
+# bc = DirichletBC(V,zero, left)
+
 u_zero_2d = Constant((0.0, 0.0))
+
+# heave_expr = Expression(
+#     "A*cos(omega*t)",
+#     # A=a_root,
+#     A = 0,
+#     omega=omega,
+#     t=0.0,
+#     degree=2
+# )
+
+Tramp = 3.0 / freq     # one oscillation period
+
+heave_expr = Expression(
+    """
+    (t < Tramp) ?
+    A*pow(sin(0.5*pi*t/Tramp),2)*cos(omega*t)
+    :
+    A*cos(omega*t)
+    """,
+    A=a_root,
+    omega=omega,
+    Tramp=Tramp,
+    pi=np.pi,
+    t=0.0,
+    degree=4
+)
+
 bc_u = DirichletBC(V.sub(0), u_zero_2d, left)
-bc_w = DirichletBC(V.sub(1), Constant(0.0), left)
-bc_theta = DirichletBC(V.sub(2), u_zero_2d, left)
+
+bc_w = DirichletBC(
+    V.sub(1),
+    heave_expr,
+    left
+)
+
+bc_theta = DirichletBC(
+    V.sub(2),
+    u_zero_2d,
+    left
+)
+
 bcs = [bc_u, bc_w, bc_theta]
+
+# Homogenous Boundary Conditions
+bc_w_hom = DirichletBC(V.sub(1), Constant(0.0), left)
+bcs_hom = [bc_u, bc_w_hom, bc_theta]
+
 
 I2 = Identity(2)
 
@@ -409,26 +469,24 @@ res = (
     m_form(a_alpha, q_test)
     + c_form(v_alpha, q_test)
     + k_form(q_alpha, q_test)
-    # - Wext(q_test)
+    - Wext(q_test)
 )
 
 jac = derivative(res, q, dq_trial)
 
-
-#
 # Coupled step-1 is commonly the hardest: the solid starts from rest/zero
 # displacement and suddenly receives aerodynamic loads. The original defaults
 # (1e-8/1e-7) are often unrealistically strict for this transient and can cause
 # an early abort that then cascades into the fluid side as a socket disconnect.
-#
-newton_atol = float(os.getenv("SOLID_NEWTON_ATOL", "2.0e-4"))
-newton_rtol = float(os.getenv("SOLID_NEWTON_RTOL", "3.0e-3"))
-newton_maxit = int(os.getenv("SOLID_NEWTON_MAXIT", "60"))
+
+newton_atol = float(os.getenv("SOLID_NEWTON_ATOL", "1.0e-6"))
+newton_rtol = float(os.getenv("SOLID_NEWTON_RTOL", "1.0e-5"))
+newton_maxit = int(os.getenv("SOLID_NEWTON_MAXIT", "120"))
 dq_newton = Function(V)
 linear_solver = LUSolver("mumps")
 
 # Optional ramp on the applied coupling forces during the Newton iterations.
-force_ramp_iters = int(os.getenv("SOLID_FORCE_RAMP_ITERS", "8"))
+force_ramp_iters = int(os.getenv("SOLID_FORCE_RAMP_ITERS", "20"))
 
 
 def local_project(v_expr, Vout, u_out=None):
@@ -658,232 +716,6 @@ def sample_vector_field_at_targets(u_fun, targets_xyz, fallback_tree=None, fallb
     return out
 
 
-def span_edges_from_stations(eta_span_vals):
-    eta = np.asarray(eta_span_vals, dtype=float).reshape(-1)
-    if len(eta) == 0:
-        raise ValueError("eta_span_vals must contain at least one station")
-    if len(eta) == 1:
-        return np.array([0.0, 1.0], dtype=float)
-
-    edges = np.zeros((len(eta) + 1,), dtype=float)
-    edges[0] = 0.0
-    edges[-1] = 1.0
-    edges[1:-1] = 0.5 * (eta[:-1] + eta[1:])
-    edges = np.clip(edges, 0.0, 1.0)
-    edges = np.maximum.accumulate(edges)
-    edges[-1] = 1.0
-    return edges
-
-
-def panel_polygon_for_span_interval(y0, y1):
-    x0_le = x_leading_edge_at(y0)
-    x0_te = x0_le + chord_at(y0)
-    x1_le = x_leading_edge_at(y1)
-    x1_te = x1_le + chord_at(y1)
-    return np.array(
-        [
-            [x0_le, y0],
-            [x0_te, y0],
-            [x1_te, y1],
-            [x1_le, y1],
-        ],
-        dtype=float,
-    )
-
-
-def polygon_area(poly):
-    poly = np.asarray(poly, dtype=float)
-    if len(poly) < 3:
-        return 0.0
-    x = poly[:, 0]
-    y = poly[:, 1]
-    return 0.5 * float(np.abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
-
-
-def polygon_centroid(poly):
-    poly = np.asarray(poly, dtype=float)
-    if len(poly) == 0:
-        return np.zeros((2,), dtype=float)
-    return np.mean(poly, axis=0)
-
-
-def is_inside_halfplane(p, a, b, eps=1.0e-14):
-    return ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])) >= -eps
-
-
-def line_intersection(p1, p2, a, b):
-    # Intersection between segment p1->p2 and the infinite line a->b.
-    x1, y1 = p1
-    x2, y2 = p2
-    x3, y3 = a
-    x4, y4 = b
-    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if abs(denom) < 1.0e-16:
-        return p2.copy()
-    px = (
-        (x1 * y2 - y1 * x2) * (x3 - x4)
-        - (x1 - x2) * (x3 * y4 - y3 * x4)
-    ) / denom
-    py = (
-        (x1 * y2 - y1 * x2) * (y3 - y4)
-        - (y1 - y2) * (x3 * y4 - y3 * x4)
-    ) / denom
-    return np.array([px, py], dtype=float)
-
-
-def clip_polygon_to_convex(poly, clip_poly):
-    poly = [np.asarray(p, dtype=float) for p in np.asarray(poly, dtype=float)]
-    clip_poly = np.asarray(clip_poly, dtype=float)
-    if len(poly) == 0:
-        return np.zeros((0, 2), dtype=float)
-    for i in range(len(clip_poly)):
-        a = clip_poly[i]
-        b = clip_poly[(i + 1) % len(clip_poly)]
-        if len(poly) == 0:
-            break
-        out = []
-        prev = poly[-1]
-        prev_inside = is_inside_halfplane(prev, a, b)
-        for cur in poly:
-            cur_inside = is_inside_halfplane(cur, a, b)
-            if cur_inside:
-                if not prev_inside:
-                    out.append(line_intersection(prev, cur, a, b))
-                out.append(cur)
-            elif prev_inside:
-                out.append(line_intersection(prev, cur, a, b))
-            prev = cur
-            prev_inside = cur_inside
-        poly = out
-    if len(poly) == 0:
-        return np.zeros((0, 2), dtype=float)
-    return np.asarray(poly, dtype=float)
-
-
-def barycentric_coords_triangle(p, tri):
-    a = tri[0]
-    b = tri[1]
-    c = tri[2]
-    v0 = b - a
-    v1 = c - a
-    v2 = p - a
-    denom = v0[0] * v1[1] - v1[0] * v0[1]
-    if abs(denom) < 1.0e-16:
-        return None
-    l2 = (v2[0] * v1[1] - v1[0] * v2[1]) / denom
-    l3 = (v0[0] * v2[1] - v2[0] * v0[1]) / denom
-    l1 = 1.0 - l2 - l3
-    return np.array([l1, l2, l3], dtype=float)
-
-
-def cg1_triangle_basis(bary):
-    return np.asarray(bary, dtype=float)
-
-
-def triangle_quadrature_rule():
-    # Degree-2 exact symmetric rule on a triangle.
-    bary = np.array(
-        [
-            [1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0],
-            [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
-            [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0],
-        ],
-        dtype=float,
-    )
-    weights = np.array([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], dtype=float)
-    return bary, weights
-
-
-def triangulate_polygon_fan(poly):
-    poly = np.asarray(poly, dtype=float)
-    if len(poly) < 3:
-        return []
-    base = poly[0]
-    tris = []
-    for i in range(1, len(poly) - 1):
-        tris.append(np.array([base, poly[i], poly[i + 1]], dtype=float))
-    return tris
-
-
-def build_common_refinement_operator(mesh_obj, trial_space, eta_span_vals):
-    eta_span_vals = np.asarray(eta_span_vals, dtype=float).reshape(-1)
-    if len(eta_span_vals) == 0:
-        raise ValueError("No span stations supplied to CRM operator")
-
-    span_edges = span_edges_from_stations(eta_span_vals)
-    panel_polys = []
-    panel_areas = np.zeros((len(eta_span_vals),), dtype=float)
-    for i_idx in range(len(eta_span_vals)):
-        y0 = span_edges[i_idx] * span
-        y1 = span_edges[i_idx + 1] * span
-        poly = panel_polygon_for_span_interval(y0, y1)
-        panel_polys.append(poly)
-        panel_areas[i_idx] = max(polygon_area(poly), 1.0e-14)
-
-    dofmap = trial_space.dofmap()
-    dof_coords = trial_space.tabulate_dof_coordinates().reshape((-1, 2))
-    ndofs = trial_space.dim()
-    n_panels = len(eta_span_vals)
-    C = np.zeros((ndofs, n_panels), dtype=float)
-
-    bary_rule, bary_weights = triangle_quadrature_rule()
-    mesh_cells = list(cells(mesh_obj))
-    for cell in mesh_cells:
-        cell_index = cell.index()
-        vert_ids = cell.entities(0)
-        tri = mesh_obj.coordinates()[vert_ids, :2]
-        tri_min = np.min(tri, axis=0)
-        tri_max = np.max(tri, axis=0)
-        local_dofs = dofmap.cell_dofs(cell_index)
-
-        for j_idx, panel_poly in enumerate(panel_polys):
-            panel_min = np.min(panel_poly, axis=0)
-            panel_max = np.max(panel_poly, axis=0)
-            if tri_max[0] < panel_min[0] - 1.0e-14 or tri_min[0] > panel_max[0] + 1.0e-14:
-                continue
-            if tri_max[1] < panel_min[1] - 1.0e-14 or tri_min[1] > panel_max[1] + 1.0e-14:
-                continue
-
-            clipped = clip_polygon_to_convex(tri, panel_poly)
-            if len(clipped) < 3:
-                continue
-
-            clipped_centroid = polygon_centroid(clipped)
-            if not np.all(np.isfinite(clipped_centroid)):
-                continue
-
-            for subtri in triangulate_polygon_fan(clipped):
-                sub_area = polygon_area(subtri)
-                if sub_area <= 1.0e-16:
-                    continue
-                for k_idx in range(3):
-                    bary_sub = bary_rule[k_idx]
-                    p = (
-                        bary_sub[0] * subtri[0]
-                        + bary_sub[1] * subtri[1]
-                        + bary_sub[2] * subtri[2]
-                    )
-                    bary_tri = barycentric_coords_triangle(p, tri)
-                    if bary_tri is None:
-                        continue
-                    phi = cg1_triangle_basis(bary_tri)
-                    wq = sub_area * bary_weights[k_idx]
-                    C[local_dofs, j_idx] += wq * phi
-
-    return C, panel_areas, panel_polys
-
-
-def panel_loads_to_solid_nodal_forces(panel_forces, C, panel_areas):
-    panel_forces = np.asarray(panel_forces, dtype=float).reshape(-1, 3)
-    densities = panel_forces / panel_areas[:, None]
-    return C @ densities
-
-
-def nodal_displacements_to_panel_average(nodal_disp, C, panel_areas):
-    nodal_disp = np.asarray(nodal_disp, dtype=float).reshape(-1, 3)
-    return (C.T @ nodal_disp) / panel_areas[:, None]
-
-
 def project_le_te_inextensible(u_le_arr, u_te_arr, le_ref, te_ref):
     # Enforce reference chord length at each span station in communicated geometry.
     Xle = le_ref + u_le_arr
@@ -1037,6 +869,111 @@ sig = Function(Vsig, name="MembraneStress")
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 out_dir = os.path.join(repo_root, "results", "solid", "v18_reissner_mindlin_plate")
 os.makedirs(out_dir, exist_ok=True)
+
+# =====================================================================
+#                    DIAGNOSTICS AND RESTART SETUP
+# =====================================================================
+
+# -----------------------
+# Restart settings
+# -----------------------
+
+restart_interval = int(os.getenv("SOLID_RESTART_INTERVAL", "100"))
+
+restart_dir = os.path.join(out_dir, "restart")
+os.makedirs(restart_dir, exist_ok=True)
+
+# -----------------------
+# Diagnostics settings
+# -----------------------
+
+diagnostics_dir = os.path.join(out_dir, "diagnostics")
+os.makedirs(diagnostics_dir, exist_ok=True)
+
+diagnostics_file = os.path.join(
+    diagnostics_dir,
+    "solid_diagnostics.csv"
+)
+
+# Flush every timestep
+flush_every = 1
+
+# =====================================================================
+# Open diagnostics file BEFORE simulation starts
+# =====================================================================
+
+diag_fp = open(diagnostics_file, "w", newline="")
+
+diag_writer = csv.writer(diag_fp)
+
+diag_writer.writerow([
+    "Step",
+    "Time",
+
+    # -----------------------------
+    # Displacements
+    # -----------------------------
+    "Root_Uz",
+    "Mid_Uz",
+    "Tip_Uz",
+
+    # -----------------------------
+    # Velocities
+    # -----------------------------
+    "Root_Vz",
+    "Mid_Vz",
+    "Tip_Vz",
+
+    # -----------------------------
+    # Accelerations
+    # -----------------------------
+    "Root_Az",
+    "Mid_Az",
+    "Tip_Az",
+
+    # -----------------------------
+    # Energies
+    # -----------------------------
+    "ElasticEnergy",
+    "KineticEnergy",
+    "DampingEnergy",
+    "TotalEnergy",
+
+    "DeltaE",
+    "DeltaE_over_E0",
+
+    # -----------------------------
+    # Work
+    # -----------------------------
+    "FluidWork",
+    "StructuralWork",
+
+    "CumFluidWork",
+    "CumStructuralWork",
+
+    "WorkError",
+
+    # -----------------------------
+    # Newton
+    # -----------------------------
+    "NewtonIterations",
+    "NewtonResidual",
+
+    # -----------------------------
+    # Forces
+    # -----------------------------
+    "ForceNorm",
+
+    # -----------------------------
+    # CPU
+    # -----------------------------
+    "WallTime"
+])
+
+diag_fp.flush()
+os.fsync(diag_fp.fileno())
+
+
 xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
 xdmf_file = XDMFFile(xdmf_path)
 xdmf_file.parameters["flush_output"] = True
@@ -1064,23 +1001,22 @@ sock_file = sock.makefile("r")
 sock.sendall((json.dumps({"role": "solid"}) + "\n").encode())
 print("Solid connected.")
 
-print("Building interface sets and CRM overlap operator...")
+print("Building interface sets and communication targets...")
 
-crm_space = FunctionSpace(mesh, "CG", 1)
-crm_coords = crm_space.tabulate_dof_coordinates().reshape((-1, 2))
+# aero_node_ids, aero_coords = get_aero_surface_node_ids()
+# interface_node_ids = aero_node_ids
+# interface_coords = aero_coords[interface_node_ids, :]
+
+
 
 aero_node_ids, aero_coords = get_aero_surface_node_ids()
 print("len(aero_coords) =", len(aero_coords))
 
-mixed_w_coords = aero_coords
-crm_tree = cKDTree(mixed_w_coords)
-crm_dist, interface_node_ids = crm_tree.query(crm_coords, k=1)
-interface_node_ids = np.asarray(interface_node_ids, dtype=np.int64)
-if np.max(crm_dist) > 1.0e-10:
-    raise RuntimeError(
-        f"CRM vertex-to-solid dof mapping failed: max mismatch={np.max(crm_dist):.3e}"
-    )
-interface_coords = mixed_w_coords[interface_node_ids]
+
+interface_node_ids = aero_node_ids
+print("max(interface_node_ids) =", np.max(interface_node_ids))
+interface_coords = aero_coords[interface_node_ids]
+
 interface_tree = cKDTree(interface_coords)
 
 # Rebuild target points for 2D plate (z=0 on midsurface)
@@ -1110,13 +1046,25 @@ np.savetxt(
     comments="",
 )
 
-crm_transfer_matrix, crm_panel_areas, crm_panel_polys = build_common_refinement_operator(
-    mesh, crm_space, eta_span_comm
+cp_targets_2d = cp_targets[:, :2]
+
+nbr_ids, nbr_w = build_local_rbf_map(
+    cp_targets_2d,
+    interface_coords,
+    rbf_radius,
+    n_neighbors=rbf_neighbors
 )
+
+# nbr_ids, nbr_w = build_local_rbf_map(
+#     cp_targets, interface_coords, rbf_radius, n_neighbors=rbf_neighbors
+# )
+
+A_diag = np.ones((cp_targets.shape[0],), dtype=float)
+S_lumped = compute_S_lumped(len(interface_node_ids), nbr_ids, nbr_w, A_diag)
 
 print(
     f"Interface ready: surface_nodes={len(interface_node_ids)}, "
-    f"cp_stations={len(cp_targets)}, overlap_panels={len(crm_panel_areas)}"
+    f"cp_stations={len(cp_targets)}, RBF neighbors={nbr_ids.shape[1]}"
 )
 
 # Extract DOFs from mixed space for force/displacement mapping
@@ -1131,8 +1079,29 @@ ext_force_vec_template = q.vector().copy()
 ext_force_vec_template.zero()
 
 time = np.linspace(0.0, T, Nsteps + 1)
-u_tip = np.zeros((Nsteps + 1,), dtype=float)
-energies = np.zeros((Nsteps + 1, 4), dtype=float)
+
+u_root = np.zeros(Nsteps+1)
+u_mid  = np.zeros(Nsteps+1)
+u_tip  = np.zeros(Nsteps+1)
+
+v_root = np.zeros(Nsteps+1)
+v_mid  = np.zeros(Nsteps+1)
+v_tip  = np.zeros(Nsteps+1)
+
+a_root = np.zeros(Nsteps+1)
+a_mid  = np.zeros(Nsteps+1)
+a_tip  = np.zeros(Nsteps+1)
+
+# energies = np.zeros((Nsteps + 1, 4), dtype=float)
+
+elastic_energy = np.zeros(Nsteps+1)
+kinetic_energy = np.zeros(Nsteps+1)
+damping_energy = np.zeros(Nsteps+1)
+total_energy   = np.zeros(Nsteps+1)
+
+delta_energy = np.zeros(Nsteps+1)
+delta_energy_ratio = np.zeros(Nsteps+1)
+
 E_damp_acc = 0.0
 force_relax = 1.0
 forces_prev = None
@@ -1140,8 +1109,25 @@ work_rel_errors = np.full((Nsteps,), np.nan, dtype=float)
 work_Wf = np.full((Nsteps,), np.nan, dtype=float)
 work_Ws = np.full((Nsteps,), np.nan, dtype=float)
 
-tip_x = x_leading_edge_at(span) + eta_cp * chord_at(span)
-tip_y = span - 1.0e-8
+fluid_work = np.zeros(Nsteps+1)
+structural_work = np.zeros(Nsteps+1)
+
+cum_fluid_work_array = np.zeros(Nsteps+1)
+cum_structural_work_array = np.zeros(Nsteps+1)
+
+work_error = np.zeros(Nsteps+1)
+
+newton_iterations = np.zeros(Nsteps+1, dtype=int)
+
+newton_residual = np.zeros(Nsteps+1)
+force_norm = np.zeros(Nsteps+1)
+
+# tip_x = x_leading_edge_at(span) + eta_cp * chord_at(span)
+# tip_y = span - 1.0e-8
+tip_x = 0.075      # 75% chord
+tip_y = 0.30       # span tip
+
+
 
 zero_payload = [[0.0, 0.0, 0.0] for _ in range(m_panels_comm)]
 init_msg = {
@@ -1179,8 +1165,70 @@ print("Initial zero geometry sent.")
 
 # q_pvd << (...)
 
+
+def save_restart(step, t, q_old, v_old, a_old):
+
+    q_old.vector().apply("insert")
+    v_old.vector().apply("insert")
+    a_old.vector().apply("insert")
+
+    File(os.path.join(restart_dir, "q_old.xml")) << q_old
+    File(os.path.join(restart_dir, "v_old.xml")) << v_old
+    File(os.path.join(restart_dir, "a_old.xml")) << a_old
+
+    info = {
+        "step": int(step),
+        "time": float(t)
+    }
+
+    with open(os.path.join(restart_dir, "restart.json"), "w") as fp:
+        json.dump(info, fp, indent=4)
+
+# =====================================================================
+#               CUMULATIVE DIAGNOSTICS
+# =====================================================================
+
+cum_fluid_work = 0.0
+cum_structural_work = 0.0
+
+E0 = None
+
+simulation_walltime = 0.0
+
+
+def save_restart(step,
+                 current_time,
+                 q_old,
+                 v_old,
+                 a_old):
+
+    File(os.path.join(restart_dir, "q_old.xml")) << q_old
+    File(os.path.join(restart_dir, "v_old.xml")) << v_old
+    File(os.path.join(restart_dir, "a_old.xml")) << a_old
+
+    restart_info = {
+        "step": int(step),
+        "time": float(current_time)
+    }
+
+    with open(os.path.join(restart_dir,
+                           "restart.json"), "w") as fp:
+
+        json.dump(restart_info,
+                  fp,
+                  indent=4)
+        
+
 for i_step in range(Nsteps):
+    step_start = perf_counter()
     print(f"Solid step {i_step + 1}/{Nsteps}: waiting for force...")
+    
+    current_time = time[i_step]
+    heave_expr.t = current_time
+
+    for bc in bcs:
+        bc.apply(q.vector())
+
     line = sock_file.readline()
     if line == "":
         raise RuntimeError("Coupling server disconnected while sending force data")
@@ -1206,13 +1254,17 @@ for i_step in range(Nsteps):
         forces_eff = force_relax * forces + (1.0 - force_relax) * forces_prev
     forces_prev = forces_eff.copy()
 
+    force_norm[i_step+1] = np.linalg.norm(forces_eff)
+
     nodal_forces = None
+    Fs_coeff = None
     if work_conservative_mode:
-        nodal_forces = panel_loads_to_solid_nodal_forces(
-            forces_eff, crm_transfer_matrix, crm_panel_areas
+        Fs_coeff, nodal_forces = apply_Tf_operator(
+            forces_eff, len(interface_node_ids), nbr_ids, nbr_w, A_diag, S_lumped
         )
         if not np.isfinite(nodal_forces).all():
             raise RuntimeError(f"Non-finite mapped nodal forces at solid step {i_step + 1}")
+
 
     ext_force_vec = ext_force_vec_template.copy()
     ext_force_vec.zero()
@@ -1224,18 +1276,25 @@ for i_step in range(Nsteps):
     converged = False
     r0 = None
     r_rel = np.inf
+
+
     for newton_it in range(newton_maxit):
         A = assemble(jac)
         R = assemble(res)
         b = R.copy()
         b *= -1.0
+        
         if force_ramp_iters > 0:
             ramp = min(1.0, float(newton_it + 1) / float(force_ramp_iters))
         else:
             ramp = 1.0
         b.axpy(ramp, ext_force_vec)
-        for bc in bcs:
+        # for bc in bcs:
+        #     bc.apply(A, b)
+
+        for bc in bcs_hom:
             bc.apply(A, b)
+
         r_norm = b.norm("l2")
         if r0 is None:
             r0 = max(r_norm, 1.0e-16)
@@ -1244,8 +1303,31 @@ for i_step in range(Nsteps):
             converged = True
             break
         linear_solver.solve(A, dq_newton.vector(), b)
+
+        print(
+            "dq norm =",
+            dq_newton.vector().norm("l2")
+        )
+        
         q.vector().axpy(1.0, dq_newton.vector())
+
+        print(
+            "q norm =",
+            q.vector().norm("l2")
+        )
+        
         q.vector().apply("insert")
+
+        for bc in bcs:
+            bc.apply(q.vector())
+
+        print(
+            f"Step {i_step+1}, "
+            f"Newton {newton_it}, "
+            f"Residual = {r_norm:.6e}"
+        )
+
+
     if not converged:
         raise RuntimeError(
             f"Newton failed at solid step {i_step + 1}: "
@@ -1253,20 +1335,42 @@ for i_step in range(Nsteps):
             f"atol={newton_atol:.2e}, rtol={newton_rtol:.2e}, "
             f"maxit={newton_maxit}, ramp_iters={force_ramp_iters}"
         )
+    # ---------------------------------------
+    # Newton diagnostics
+    # ---------------------------------------
 
-    if work_conservative_mode and nodal_forces is not None:
+    newton_iterations[i_step+1] = newton_it + 1
+    newton_residual[i_step+1] = r_norm
+    
+
+    if work_conservative_mode and nodal_forces is not None and Fs_coeff is not None:
         interface_disp_prev = get_nodal_displacements_plate(
             q_old, interface_node_ids, dofs_u_x, dofs_u_y, dofs_w
         )
-        u_cp_prev = nodal_displacements_to_panel_average(
-            interface_disp_prev, crm_transfer_matrix, crm_panel_areas
+        u_cp_prev = sample_vector_field_at_targets(
+            q_old,
+            cp_targets,
+            fallback_tree=interface_tree,
+            fallback_vals=interface_disp_prev,
         )
-        Wf = float(np.sum(u_cp_prev * forces_eff))
-        Ws = float(np.sum(interface_disp_prev * nodal_forces))
+        Wf = float(np.sum(u_cp_prev * (forces_eff * A_diag[:, None])))
+        Ws = float(np.sum(interface_disp_prev * (Fs_coeff * S_lumped[:, None])))
         rel_work_err = abs(Wf - Ws) / max(abs(Wf), abs(Ws), 1.0e-16)
         work_rel_errors[i_step] = rel_work_err
         work_Wf[i_step] = Wf
         work_Ws[i_step] = Ws
+
+        cum_fluid_work += Wf
+        cum_structural_work += Ws
+
+        cum_fluid_work_array[i_step+1] = cum_fluid_work
+        cum_structural_work_array[i_step+1] = cum_structural_work
+
+        fluid_work[i_step+1] = Wf
+        structural_work[i_step+1] = Ws
+
+        work_error[i_step+1] = rel_work_err
+
         if i_step == 0 or (i_step + 1) % 20 == 0:
             print(
                 f"Work audit step {i_step + 1}: "
@@ -1274,6 +1378,20 @@ for i_step in range(Nsteps):
             )
 
     update_fields(q, q_old, v_old, a_old)
+    if ((i_step+1)%restart_interval)==0:
+
+        save_restart(
+            i_step+1,
+            t,
+            q_old,
+            v_old,
+            a_old
+        )
+
+        diag_fp.flush()
+        os.fsync(diag_fp.fileno())
+
+
     t = time[i_step + 1]
 
     xdmf_file.write(q, t)
@@ -1290,7 +1408,17 @@ for i_step in range(Nsteps):
     E_kin = 0.5 * assemble(m_form(v_old, v_old))
     E_damp_acc += dt_value * assemble(c_form(v_old, v_old))
     E_tot = E_elas + E_kin + E_damp_acc
-    energies[i_step + 1, :] = np.array([E_elas, E_kin, E_damp_acc, E_tot])
+    # energies[i_step + 1, :] = np.array([E_elas, E_kin, E_damp_acc, E_tot])
+    elastic_energy[i_step+1] = E_elas
+    kinetic_energy[i_step+1] = E_kin
+    damping_energy[i_step+1] = E_damp_acc
+    total_energy[i_step+1] = E_tot
+
+    if E0 is None:
+        E0 = max(E_tot,1e-16)
+
+    delta_energy[i_step+1] = E_tot-E0
+    delta_energy_ratio[i_step+1] = (E_tot-E0)/E0
 
     # Get tip transverse displacement
     try:
@@ -1303,8 +1431,132 @@ for i_step in range(Nsteps):
         theta_y = vals[4]
 
         u_tip[i_step + 1] = float(w_eval)
+        try:
+        
+            vals_v = v_old(Point(tip_x, tip_y))
+
+            v_tip[i_step+1] = float(vals_v[2])
+
+        except RuntimeError:
+        
+            v_tip[i_step+1] = 0.0
+
+        try:
+
+            vals_a = a_old(Point(tip_x, tip_y))
+
+            a_tip[i_step+1] = float(vals_a[2])
+
+        except RuntimeError:
+        
+            a_tip[i_step+1] = 0.0
+    
     except RuntimeError:
         u_tip[i_step + 1] = 0.0
+
+
+    root_x = 0.075
+    root_y = 0.0
+
+    mid_x = 0.075
+    mid_y = 0.15
+
+    try:
+
+        vals_mid = q(Point(mid_x, mid_y))
+        u_mid[i_step+1] = float(vals_mid[2])
+
+        vals_mid_v = v_old(Point(mid_x, mid_y))
+        v_mid[i_step+1] = float(vals_mid_v[2])
+
+        vals_mid_a = a_old(Point(mid_x, mid_y))
+        a_mid[i_step+1] = float(vals_mid_a[2])
+
+    except RuntimeError:
+
+        u_mid[i_step+1] = 0.0
+        v_mid[i_step+1] = 0.0
+        a_mid[i_step+1] = 0.0
+
+    # root_z = 0.0
+
+    # try:
+    #     u_root[i_step + 1] = vals = q(Point(root_x,root_y))
+    # except RuntimeError:
+    #     u_root[i_step+1] = float(vals[2])
+
+    # try:
+    #     vals_root = q(Point(root_x, root_y))
+
+    #     u_root[i_step + 1] = float(vals_root[2])
+
+    # except RuntimeError:
+    #     u_root[i_step + 1] = 0.0
+
+    try:
+
+        vals_root = q(Point(root_x, root_y))
+        u_root[i_step+1] = float(vals_root[2])
+    
+        vals_root_v = v_old(Point(root_x, root_y))
+        v_root[i_step+1] = float(vals_root_v[2])
+    
+        vals_root_a = a_old(Point(root_x, root_y))
+        a_root[i_step+1] = float(vals_root_a[2])
+    
+    except RuntimeError:
+    
+        u_root[i_step+1] = 0.0
+        v_root[i_step+1] = 0.0
+        a_root[i_step+1] = 0.0
+    
+    diag_writer.writerow([
+
+        i_step+1,
+        t,
+
+        u_root[i_step+1],
+        u_mid[i_step+1],
+        u_tip[i_step+1],
+
+        v_root[i_step+1],
+        v_mid[i_step+1],
+        v_tip[i_step+1],
+
+        a_root[i_step+1],
+        a_mid[i_step+1],
+        a_tip[i_step+1],
+
+        elastic_energy[i_step+1],
+        kinetic_energy[i_step+1],
+        damping_energy[i_step+1],
+        total_energy[i_step+1],
+
+        delta_energy[i_step+1],
+        delta_energy_ratio[i_step+1],
+
+        fluid_work[i_step+1],
+        structural_work[i_step+1],
+
+        cum_fluid_work_array[i_step+1],
+        cum_structural_work_array[i_step+1],
+
+        work_error[i_step+1],
+
+        newton_iterations[i_step+1],
+        newton_residual[i_step+1],
+
+        force_norm[i_step+1],
+
+        simulation_walltime
+
+    ])
+
+    if ((i_step+1)%flush_every)==0:
+
+        diag_fp.flush()
+
+        os.fsync(diag_fp.fileno())
 
     if i_step < Nsteps - 1:
         interface_disp_cur = get_nodal_displacements_plate(
@@ -1352,15 +1604,15 @@ for i_step in range(Nsteps):
                         f"LE pre-proj rel seg err max/mean = {np.max(rel_sp_le):.3e}/{np.mean(rel_sp_le):.3e}, "
                         f"TE pre-proj rel seg err max/mean = {np.max(rel_sp_te):.3e}/{np.mean(rel_sp_te):.3e}"
                     )
-        u_cp_arr = nodal_displacements_to_panel_average(
-            interface_disp_cur, crm_transfer_matrix, crm_panel_areas
-        )
+        u_cp_arr = (1.0 - eta_cp) * u_le_arr + eta_cp * u_te_arr
         zero_rot = np.zeros_like(u_cp_arr)
 
         if DEBUG_IO and (i_step == 0 or (i_step + 1) % 20 == 0):
             print(f"SEND step {i_step + 1} first LE/TE = {u_le_arr[0, :].tolist()} / {u_te_arr[0, :].tolist()}")
             print(f"SEND step {i_step + 1} last  LE/TE = {u_le_arr[-1, :].tolist()} / {u_te_arr[-1, :].tolist()}")
-
+        
+        simulation_walltime = perf_counter()-step_start
+        
         msg_geo = json.dumps(
             {
                 "step": i_step + 1,
@@ -1389,24 +1641,33 @@ print("Solid solver finished.")
 print(f"Solid field outputs: {xdmf_path}")
 print(f"Solid VTK outputs: {q_pvd_path}, {sig_pvd_path}, {mesh_pvd_path}")
 
-diag_csv = os.path.join(out_dir, "solid_v18_diagnostics.csv")
+# diag_csv = os.path.join(out_dir, "solid_v18_diagnostics.csv")
 
-with open(diag_csv, "w") as fp:
-    fp.write(
-        "step,time,u_tip,E_elas,E_kin,E_damp,E_tot,"
-        "work_Wf,work_Ws,work_rel_error\n"
-    )
+# with open(diag_csv, "w") as fp:
+#     # fp.write(
+#     #     "step,time,u_tip,E_elas,E_kin,E_damp,E_tot,"
+#     #     "work_Wf,work_Ws,work_rel_error\n"
+#     # )
+#     fp.write(
+#         "step,time,u_tip,v_tip,a_tip,"
+#         "E_elas,E_kin,E_damp,E_tot,"
+#         "work_Wf,work_Ws,work_rel_error\n"
+#     )
 
-    for k_idx in range(Nsteps):
-        fp.write(
-            f"{k_idx + 1},"
-            f"{time[k_idx + 1]:.12e},"
-            f"{u_tip[k_idx + 1]:.12e},"
-            f"{energies[k_idx + 1, 0]:.12e},"
-            f"{energies[k_idx + 1, 1]:.12e},"
-            f"{energies[k_idx + 1, 2]:.12e},"
-            f"{energies[k_idx + 1, 3]:.12e},"
-            f"{work_Wf[k_idx]:.12e},"
-            f"{work_Ws[k_idx]:.12e},"
-            f"{work_rel_errors[k_idx]:.12e}\n"
-        )
+#     for k_idx in range(Nsteps):
+#         fp.write(
+#             f"{k_idx+1},"
+#             f"{time[k_idx+1]:.12e},"
+#             f"{u_tip[k_idx+1]:.12e},"
+#             f"{v_tip[k_idx+1]:.12e},"
+#             f"{a_tip[k_idx+1]:.12e},"
+#             f"{energies[k_idx+1,0]:.12e},"
+#             f"{energies[k_idx+1,1]:.12e},"
+#             f"{energies[k_idx+1,2]:.12e},"
+#             f"{energies[k_idx+1,3]:.12e},"
+#             f"{work_Wf[k_idx]:.12e},"
+#             f"{work_Ws[k_idx]:.12e},"
+#             f"{work_rel_errors[k_idx]:.12e}\n"
+#         )
+
+diag_fp.close()
