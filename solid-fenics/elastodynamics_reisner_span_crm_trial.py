@@ -85,7 +85,10 @@ eta_span_comm, eta_span_comm_indices = build_eta_span_comm(n_span_comm, ny, span
 eta_cp = float(os.getenv("COUPLING_ETA_CP", "0.75"))
 eta_cp_comm = np.array([eta_cp], dtype=float)
 
+
 work_conservative_mode = True
+
+# Params for testing rbf only
 rbf_radius = float(os.getenv("COUPLING_RBF_RADIUS", os.getenv("COUPLING_RBF_EPS", "0.08")))
 rbf_neighbors = int(os.getenv("COUPLING_RBF_NEIGHBORS", "24"))
 max_abs_force_component = float(os.getenv("COUPLING_MAX_FORCE_COMPONENT", "5.0e3"))

@@ -2,35 +2,99 @@ from dolfin import *
 import json
 import os
 import socket
-
+import argparse
+import yaml
 import numpy as np
 from scipy.spatial import cKDTree
+
+
+
+
+solid_config, fluid_config, coupling_config = None, None, None
+
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+default_config_path = os.path.join(repo_root, "coupling", "config")
+
+parser = argparse.ArgumentParser(description="Solid solver for coupled FSI simulation")
+parser.add_argument(
+    "--config_path",
+    type=str,
+    default=default_config_path,
+    help="Path to YAML configuration directory",
+)
+args = parser.parse_args()
+
+
+def load_yaml_config(config_dir, *candidate_names):
+    for name in candidate_names:
+        cfg_path = os.path.join(config_dir, name)
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r") as stream:
+                return yaml.safe_load(stream)
+    raise FileNotFoundError(
+        f"could not find this config file in {config_dir}: {', '.join(candidate_names)}"
+    )
+
+
+def cfg_get(cfg, *keys, default=None):
+    cur = cfg
+    for key in keys:
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur[key]
+    return cur
+
+
+try:
+    solid_config = load_yaml_config(args.config_path, "solid_params.yaml")
+    fluid_config = load_yaml_config(args.config_path, "fluid_params.yaml")
+    coupling_config = load_yaml_config(args.config_path, "coupling_params.yaml")
+    print(solid_config)
+    print(fluid_config)
+    print(coupling_config)
+except (yaml.YAMLError, FileNotFoundError) as exc:
+    raise RuntimeError(f"Error loading configuration: {exc}")
+
+
+
 
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
 
-T = float(os.getenv("COUPLING_TTOT", "5.0"))
-Nsteps = int(os.getenv("COUPLING_NSTEPS", "1000"))
+T = float(coupling_config["total_time"])
+Nsteps = int(cfg_get(coupling_config, "n_steps", default=cfg_get(coupling_config, "nsteps")))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
 
-span = float(os.getenv("SOLID_SPAN", "0.8"))
-root_chord = float(os.getenv("SOLID_ROOT_CHORD", "0.12"))
-tip_chord = float(os.getenv("SOLID_TIP_CHORD", "0.12"))
-thickness_ratio = float(os.getenv("SOLID_THICKNESS_RATIO", "0.12"))
-leading_edge_sweep = float(os.getenv("SOLID_LE_SWEEP", "0.0"))
+span = float(cfg_get(solid_config, "span"))
+root_chord = float(cfg_get(solid_config, "root_chord"))
+tip_chord = float(cfg_get(solid_config, "tip_chord"))
+thickness_ratio = float(cfg_get(solid_config, "thickness_ratio"))
+leading_edge_sweep = float(cfg_get(solid_config, "leading_edge_sweep", default=0.0))
 
 # For 2D Reissner-Mindlin plate: only chord and span directions (no thickness discretization)
-nx = int(os.getenv("SOLID_NX", "20"))
-ny = int(os.getenv("SOLID_NY", "240"))
+nx = int(cfg_get(solid_config, "nx"))
+ny = int(cfg_get(solid_config, "ny"))
 
 # Communication stations for the fluid v10 spanwise panels.
-n_span_comm = int(os.getenv("COUPLING_NSPAN_COMM", "80"))
+n_span_comm = int(
+    cfg_get(fluid_config, "mesh", "n_span", default=cfg_get(fluid_config, "n_span_comm", default=80))
+)
 n_chord_comm = 1
 m_panels_comm = n_span_comm * n_chord_comm
-span_sampling_mode = os.getenv("COUPLING_SPAN_SAMPLING", "node-stride").strip().lower()
-span_custom_stride = os.getenv("COUPLING_SPAN_STRIDE")
+span_sampling_mode = str(
+    cfg_get(
+        solid_config,
+        "span_sampling_mode",
+        default=cfg_get(coupling_config, "span_sampling", default="node-stride"),
+    )
+).strip().lower()
+span_custom_stride = cfg_get(
+    coupling_config,
+    "custom_span_stride",
+    default=os.getenv("COUPLING_SPAN_STRIDE"),
+)
 
 
 def build_eta_span_comm(n_span_vals, ny_vals, mode):
@@ -85,15 +149,24 @@ eta_span_comm, eta_span_comm_indices = build_eta_span_comm(n_span_comm, ny, span
 eta_cp = float(os.getenv("COUPLING_ETA_CP", "0.75"))
 eta_cp_comm = np.array([eta_cp], dtype=float)
 
-work_conservative_mode = True
-rbf_radius = float(os.getenv("COUPLING_RBF_RADIUS", os.getenv("COUPLING_RBF_EPS", "0.08")))
-rbf_neighbors = int(os.getenv("COUPLING_RBF_NEIGHBORS", "24"))
-max_abs_force_component = float(os.getenv("COUPLING_MAX_FORCE_COMPONENT", "5.0e3"))
+work_conservative_mode = bool(
+    cfg_get(
+        solid_config,
+        "work_conservative_mode",
+        default=cfg_get(solid_config, "work_conservation_mode", default=True),
+    )
+)
+rbf_radius = float(cfg_get(solid_config, "rbf_radius", default=0.08))
+rbf_neighbors = int(cfg_get(solid_config, "rbf_neighbors", default=24))
+max_abs_force_component = float(
+    cfg_get(solid_config, "max_abs_force_component", default=5.0e3)
+)
 
 DEBUG_IO = os.getenv("COUPLING_DEBUG_IO", "0").strip().lower() not in ("0", "false", "no")
 edge_eval_xi_eps = float(os.getenv("COUPLING_EDGE_EVAL_XI_EPS", "1.0e-6"))
 
-enforce_chord_projection = (
+
+'''enforce_chord_projection = (
     os.getenv("COUPLING_ENFORCE_CHORD", "0").lower()
     not in ("0", "false", "no")
 )
@@ -101,14 +174,17 @@ enforce_chord_projection = (
 enforce_span_projection = (
     os.getenv("COUPLING_ENFORCE_SPAN", "0").lower()
     not in ("0", "false", "no")
+)'''
+
+
+
+
+enforce_chord_projection = bool(
+    cfg_get(solid_config, "enforce_chord_projection", default=False)
 )
-
-
-
-
-#just use for now
-enforce_chord_projection = False
-enforce_span_projection = False
+enforce_span_projection = bool(
+    cfg_get(solid_config, "enforce_span_projection", default=False)
+)
 
 
 
@@ -178,16 +254,18 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0, shape=(2, 2))
 
 t_aero = Function(Vt, name="AerodynamicTraction")
 
-E = float(os.getenv("SOLID_E", "6.8e10"))
-nu = float(os.getenv("SOLID_NU", "0.35"))
-rho_s = float(os.getenv("SOLID_RHO", "1600.0"))
+E = float(cfg_get(solid_config, "E"))
+nu = float(cfg_get(solid_config, "nu"))
+rho_s = float(cfg_get(solid_config, "rho_s"))
 rho = Constant(rho_s)
-eta_m = Constant(float(os.getenv("SOLID_ETA_M", "0.8")))
-eta_k = Constant(float(os.getenv("SOLID_ETA_K", "1.0e-4")))
-kappa_shear = Constant(5.0 / 6.0)  # Shear correction factor for Reissner-Mindlin
+eta_m = Constant(float(cfg_get(solid_config, "eta_m")))
+eta_k = Constant(float(cfg_get(solid_config, "eta_k")))
+kappa_shear = Constant(
+    float(cfg_get(solid_config, "kappa_shear"))
+)  # Shear correction factor for Reissner-Mindlin
 
-alpha_m = Constant(0.10)
-alpha_f = Constant(0.20)
+alpha_m = Constant(float(cfg_get(solid_config, "alpha_m")))
+alpha_f = Constant(float(cfg_get(solid_config, "alpha_f")))
 gamma = Constant(0.5 + alpha_f - alpha_m)
 beta = Constant((gamma + 0.5) ** 2 / 4.0)
 
@@ -421,14 +499,30 @@ jac = derivative(res, q, dq_trial)
 # (1e-8/1e-7) are often unrealistically strict for this transient and can cause
 # an early abort that then cascades into the fluid side as a socket disconnect.
 #
-newton_atol = float(os.getenv("SOLID_NEWTON_ATOL", "2.0e-4"))
-newton_rtol = float(os.getenv("SOLID_NEWTON_RTOL", "3.0e-3"))
-newton_maxit = int(os.getenv("SOLID_NEWTON_MAXIT", "60"))
+newton_atol = float(
+    cfg_get(solid_config, "newton_atol", default=os.getenv("SOLID_NEWTON_ATOL", "2.0e-4"))
+)
+newton_rtol = float(
+    cfg_get(solid_config, "newton_rtol", default=os.getenv("SOLID_NEWTON_RTOL", "3.0e-3"))
+)
+newton_maxit = int(
+    cfg_get(
+        solid_config,
+        "newton_maxiter",
+        default=cfg_get(solid_config, "newton_maxit", default=os.getenv("SOLID_NEWTON_MAXIT", "60")),
+    )
+)
 dq_newton = Function(V)
 linear_solver = LUSolver("mumps")
 
 # Optional ramp on the applied coupling forces during the Newton iterations.
-force_ramp_iters = int(os.getenv("SOLID_FORCE_RAMP_ITERS", "8"))
+force_ramp_iters = int(
+    cfg_get(
+        solid_config,
+        "force_ramp_iters",
+        default=os.getenv("SOLID_FORCE_RAMP_ITERS", "8"),
+    )
+)
 
 
 def local_project(v_expr, Vout, u_out=None):
@@ -1034,18 +1128,38 @@ def get_nodal_displacements_plate(q_fun, node_ids, dofs_u_x, dofs_u_y, dofs_w):
 
 sig = Function(Vsig, name="MembraneStress")
 
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-out_dir = os.path.join(repo_root, "results", "solid", "v18_reissner_mindlin_plate")
+results_root = cfg_get(solid_config, "results_root", default=os.path.join(repo_root, "results"))
+solid_output_dir = cfg_get(
+    solid_config,
+    "output_dir",
+    default=os.path.join("solid", cfg_get(solid_config, "output_run_name", default="v18_reissner_mindlin_plate")),
+)
+if os.path.isabs(results_root):
+    base_results_root = results_root
+else:
+    base_results_root = os.path.join(repo_root, results_root)
+if os.path.isabs(solid_output_dir):
+    out_dir = solid_output_dir
+else:
+    out_dir = os.path.join(base_results_root, solid_output_dir)
 os.makedirs(out_dir, exist_ok=True)
-xdmf_path = os.path.join(out_dir, "elastodynamics-results.xdmf")
+xdmf_path = os.path.join(
+    out_dir, cfg_get(solid_config, "xdmf_filename", default="elastodynamics-results.xdmf")
+)
 xdmf_file = XDMFFile(xdmf_path)
 xdmf_file.parameters["flush_output"] = True
 xdmf_file.parameters["functions_share_mesh"] = True
 xdmf_file.parameters["rewrite_function_mesh"] = False
 
-mesh_pvd_path = os.path.join(out_dir, "solid_mesh.pvd")
-q_pvd_path = os.path.join(out_dir, "plate_state.pvd")
-sig_pvd_path = os.path.join(out_dir, "membrane_stress.pvd")
+mesh_pvd_path = os.path.join(
+    out_dir, cfg_get(solid_config, "mesh_pvd_filename", default="solid_mesh.pvd")
+)
+q_pvd_path = os.path.join(
+    out_dir, cfg_get(solid_config, "q_pvd_filename", default="plate_state.pvd")
+)
+sig_pvd_path = os.path.join(
+    out_dir, cfg_get(solid_config, "sig_pvd_filename", default="membrane_stress.pvd")
+)
 mesh_pvd = File(mesh_pvd_path)
 q_pvd = File(q_pvd_path)
 sig_pvd = File(sig_pvd_path)
@@ -1053,10 +1167,12 @@ mesh_pvd << mesh
 
 print("Connecting solid to coupling server...")
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+coupling_host = str(cfg_get(coupling_config, "host", default=os.getenv("COUPLING_HOST", "127.0.0.1")))
+coupling_port = int(cfg_get(coupling_config, "port", default=os.getenv("COUPLING_PORT", "9000")))
 sock.connect(
     (
-        os.getenv("COUPLING_HOST", "127.0.0.1"),
-        int(os.getenv("COUPLING_PORT", "9000")),
+        coupling_host,
+        coupling_port,
     )
 )
 
@@ -1178,6 +1294,10 @@ print("Initial zero geometry sent.")
 # xdmf_file.write(q, 0.0)
 
 # q_pvd << (...)
+
+
+
+
 
 for i_step in range(Nsteps):
     print(f"Solid step {i_step + 1}/{Nsteps}: waiting for force...")
@@ -1389,7 +1509,9 @@ print("Solid solver finished.")
 print(f"Solid field outputs: {xdmf_path}")
 print(f"Solid VTK outputs: {q_pvd_path}, {sig_pvd_path}, {mesh_pvd_path}")
 
-diag_csv = os.path.join(out_dir, "solid_v18_diagnostics.csv")
+diag_csv = os.path.join(
+    out_dir, cfg_get(solid_config, "diag_csv_filename", default="solid_v18_diagnostics.csv")
+)
 
 with open(diag_csv, "w") as fp:
     fp.write(

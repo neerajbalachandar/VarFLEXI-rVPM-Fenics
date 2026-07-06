@@ -1,0 +1,59 @@
+
+# Solid configuration file for VarFlExI
+
+# solid model description
+span: 0.8
+root_chord: 0.12
+tip_chord: 0.12
+thickness_ratio: 0.12
+leading_edge_sweep: 0.0
+nx : 20
+ny : 240
+eta_cp: 0.75 # must be constant (empirical)
+work_conservative_mode: true
+work_conservation_mode: true
+
+# striding parameters
+span_sampling_mode: "node-stride" # need to explore custom stride during sweeps
+
+
+# Work conservation operator parameters
+rbf_radius: 0.08
+rbf_neighbors: 24
+max_abs_force_component: 5.0e3 # clipping? @neeraj pls check this by making it high
+enforce_chord_projection: false
+enforce_span_projection: false
+
+# output paths
+results_root: results
+output_dir: solid/v18_reissner_mindlin_plate
+output_run_name: v18_reissner_mindlin_plate
+xdmf_filename: elastodynamics-results.xdmf
+mesh_pvd_filename: solid_mesh.pvd
+q_pvd_filename: plate_state.pvd
+sig_pvd_filename: membrane_stress.pvd
+diag_csv_filename: solid_v18_diagnostics.csv
+
+#material parameters
+E: 6.8e10
+nu: 0.35
+rho_s: 1600.0
+eta_m: 0.8
+eta_k: 1.0e-4
+kappa_shear:  0.833
+alpha_m: 0.1
+alpha_f: 0.2
+
+#Newton iterator parameters
+newton_atol: 2.0e-4
+newton_rtol: 3.0e-3
+newton_maxiter: 60
+
+force_ramp_iters: 8
+
+
+
+
+
+
+
