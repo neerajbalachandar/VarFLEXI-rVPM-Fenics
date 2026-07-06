@@ -25,6 +25,8 @@ flow:
 
   rho: 1.0
 
+  nu: 1.0e-6
+
 # ============================================================================
 # Wing Geometry - Read certain params from solid.yaml files
 # ============================================================================
@@ -182,6 +184,9 @@ fmm:
   default_rho_over_sigma: 1.0
 
   minimum_ncrit: 3
+
+
+vpm_scheme: None # Should be corrected according to the output values possible for the variable.
 
 # ============================================================================
 # Output

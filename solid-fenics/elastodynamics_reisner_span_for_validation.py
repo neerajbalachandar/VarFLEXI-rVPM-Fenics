@@ -12,8 +12,8 @@ parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
 
-T = float(os.getenv("COUPLING_TTOT", "46"))
-Nsteps = int(os.getenv("COUPLING_NSTEPS", "9000"))
+T = float(os.getenv("COUPLING_TTOT", "15"))
+Nsteps = int(os.getenv("COUPLING_NSTEPS", "3000"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
 

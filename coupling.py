@@ -8,7 +8,7 @@ from typing import Optional, List
 
 HOST = os.getenv("COUPLING_HOST", "127.0.0.1")
 PORT = int(os.getenv("COUPLING_PORT", "9000"))
-NSTEPS = int(os.getenv("COUPLING_NSTEPS", "1000"))
+NSTEPS = int(os.getenv("COUPLING_NSTEPS", "3000"))
 FORCE_RELAX = float(os.getenv("COUPLING_FORCE_RELAX", "0.2"))
 USE_AITKEN = os.getenv("COUPLING_AITKEN", "0").strip() not in ("0", "false", "False")
 
