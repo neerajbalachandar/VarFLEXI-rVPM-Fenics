@@ -1,0 +1,222 @@
+# ============================================================================
+# Fluid Solver Configuration
+# ============================================================================
+
+simulation:
+
+  run_name: static_airfoil_spanwise
+
+  total_time: 5.0          # seconds
+  nsteps: 1000
+
+  particles_per_step: 1
+
+  save_every: 1
+
+# ============================================================================
+# Freestream
+# ============================================================================
+
+flow:
+
+  aoa_deg: 8.0
+
+  vinf: 8.0
+
+  rho: 1.0
+
+# ============================================================================
+# Wing Geometry - Read certain params from solid.yaml files
+# ============================================================================
+
+# wing:
+
+#   span: 0.8
+
+#   root_chord: 0.12
+
+#   tip_chord: 0.12
+
+#   leading_edge_sweep: 0.0
+
+  twist_root: 0.0
+
+  twist_tip: 0.0
+
+  dihedral: 0.0
+
+# ============================================================================
+# VLM Mesh
+# ============================================================================
+
+mesh:
+
+  n_span: 80 # Shouldn't these be comm_nspan and comm_nchord
+
+  n_chord: 1 # Should be fixed in code if error appears
+
+  eta_cp: 0.75
+
+  eta_bv: 0.25
+
+# ============================================================================
+# Coupling - should be read from coupling.yaml file
+# ============================================================================
+
+# coupling:
+
+#   host: "127.0.0.1"
+
+#   port: 9000
+
+#   total_time: 5.0
+
+#   nsteps: 1000
+
+#   communication_span: 80
+
+#   solid_ny: 240
+
+#   span_sampling: node-stride
+
+#   custom_span_stride: null
+
+# ============================================================================
+# Geometry Relaxation - from coupling yaml
+# ============================================================================
+
+# relaxation:
+
+#   geometry: 1.0
+
+#   force: 1.0
+
+# ============================================================================
+# Displacement Scaling
+# ============================================================================
+
+displacement_scaling:
+
+  x: 1.0
+
+  y: 1.0
+
+  z: 1.0
+
+# ============================================================================
+# Wake Treatment
+# ============================================================================
+
+wake:
+
+  lambda_vpm: 2.0
+
+  remove_every: 100
+
+  sphere_factor: 200.0
+
+  strength:
+
+    min_factor: 1.0e-8
+
+    max_factor: 50.0
+
+  sigma:
+
+    min_factor: 1.0e-3
+
+    max_factor: 50.0
+
+  wake_coupled: true
+
+# ============================================================================
+# Shedding
+# ============================================================================
+
+shedding:
+
+  start_with_wake: true
+
+  unsteady: true
+
+  unsteady_criterion: 0.0
+
+  omit_rows: []
+
+# ============================================================================
+# VLM Solver
+# ============================================================================
+
+vlm:
+
+  relaxation: 0.35
+
+  sigma_solver: -1
+
+  sigma_surface: 0.05
+
+# ============================================================================
+# FMM Parameters
+# ============================================================================
+
+fmm:
+
+  p: 4
+
+  ncrit: 50
+
+  theta: 0.4
+
+  shrink_recenter: true
+
+  relative_tolerance: 1e-3
+
+  absolute_tolerance: 1e-3
+
+  autotune_p: true
+
+  autotune_ncrit: true
+
+  autotune_regularization: false
+
+  default_rho_over_sigma: 1.0
+
+  minimum_ncrit: 3
+
+# ============================================================================
+# Output
+# ============================================================================
+
+output:
+
+  save_directory: results/fluid
+
+  create_directory: true
+
+# ============================================================================
+# Debug
+# ============================================================================
+
+debug:
+
+  io: false
+
+  print_solver_info: true
+
+  save_geometry_csv: true
+
+  save_force_history: true
+
+  save_diagnostics: true 
+
+  save_horseshoes: true
+
+# ============================================================================
+# Advanced
+# ============================================================================
+
+advanced:
+
+  regularize_vlm: true
+
+  use_ftot_force: true
