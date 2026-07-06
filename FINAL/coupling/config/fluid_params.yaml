@@ -186,7 +186,7 @@ fmm:
   minimum_ncrit: 3
 
 
-vpm_scheme: None # Should be corrected according to the output values possible for the variable.
+viscous_scheme: CoreSpreading or None? # Should be corrected according to the output values possible for the variable.
 
 # ============================================================================
 # Output

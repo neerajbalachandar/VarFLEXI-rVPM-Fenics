@@ -318,7 +318,7 @@ vpm_fmm_settings = vpm.FMM(
 )
 
 # Viscous scheme ------------------------------------------------------
-vpm_scheme = vpm.Viscous(nu=nu)
+vpm_viscous = vpm.CoreSpreading(nu, sigma_vpm_overwrite, 1.0)
 
 println(
     "Shedding config v9: spanwise-only wing, n_span=$(n_span), " *
@@ -942,7 +942,7 @@ uns.run_simulation(simulation, nsteps;
     sigma_rotor_surf=sigma_vlm_surf,
     sigma_vpm_overwrite=sigma_vpm_overwrite,
     vpm_fmm=vpm_fmm_settings,
-    vpm_scheme=vpm_scheme, # New VPM Viscous scheme
+    vpm_viscous = vpm_viscous, # New VPM Viscous scheme
     shed_starting=shed_starting,
     shed_unsteady=use_unsteady_shedding,
     unsteady_shedcrit=unsteady_shedcrit,
