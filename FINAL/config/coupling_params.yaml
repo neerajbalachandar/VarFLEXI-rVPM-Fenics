@@ -3,15 +3,19 @@
 total_time: 5.0
 n_steps: 1000
 
-
+# What about the comm_nspan and comm_nchord, eta_cp?
 
 host: "127.0.0.1"
 port: 9000
 
+comm_nspan: 80
+comm_nchord: 1
 
-# Should be transferred to coupling.yaml 
+
+# Should be transferred to coupling.yaml. Why 2? 
 work_conservative_mode: true
-work_conservation_mode: true
+work_conservation_mode: true 
+# What about the string with crm/transfer_operator?
 
 # striding parameters - coupling.yaml
 span_sampling_mode: "node-stride" # need to explore custom stride during sweeps
@@ -23,6 +27,14 @@ rbf_neighbors: 24
 max_abs_force_component: 5.0e3 # clipping? @neeraj pls check this by making it high
 enforce_chord_projection: false
 enforce_span_projection: false
+# edge_eval_xi_eps:
 
 force_relax: 1.0
 geom_relax: 1.0
+
+debug_io:
+payload_indexing:
+
+send_cp: true 
+send_le: true
+send_te: true
