@@ -7,3 +7,22 @@ n_steps: 1000
 
 host: "127.0.0.1"
 port: 9000
+
+
+# Should be transferred to coupling.yaml 
+work_conservative_mode: true
+work_conservation_mode: true
+
+# striding parameters - coupling.yaml
+span_sampling_mode: "node-stride" # need to explore custom stride during sweeps
+
+
+# Work conservation operator parameters - same in coupling.yaml
+rbf_radius: 0.08
+rbf_neighbors: 24
+max_abs_force_component: 5.0e3 # clipping? @neeraj pls check this by making it high
+enforce_chord_projection: false
+enforce_span_projection: false
+
+force_relax: 1.0
+geom_relax: 1.0

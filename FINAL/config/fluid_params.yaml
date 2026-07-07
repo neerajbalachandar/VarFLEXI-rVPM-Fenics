@@ -1,6 +1,6 @@
 run_name: static_airfoil_spanwise
-total_time: 5.0          # seconds
-nsteps: 1000
+# total_time: 5.0          # seconds
+# nsteps: 1000
 particles_per_step: 1
 save_every: 1
 aoa_deg: 8.0
@@ -71,6 +71,8 @@ viscous_scheme: CoreSpreading or None? # Should be corrected according to the ou
 
 save_directory: results/fluid
 create_directory: true
+create_savepath: true
+prompt: false
 io: false
 print_solver_info: true
 save_geometry_csv: true
@@ -79,3 +81,4 @@ save_diagnostics: true
 save_horseshoes: true
 regularize_vlm: true
 use_ftot_force: true
+nsteps_save: 1

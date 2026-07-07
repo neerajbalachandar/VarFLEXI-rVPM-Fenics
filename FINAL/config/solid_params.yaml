@@ -9,20 +9,22 @@ thickness_ratio: 0.12
 leading_edge_sweep: 0.0
 nx : 20
 ny : 240
-eta_cp: 0.75 # must be constant (empirical)
-work_conservative_mode: true
-work_conservation_mode: true
+# eta_cp: 0.75 # must be constant (empirical) - but should be in fluid_params.yaml
 
-# striding parameters
-span_sampling_mode: "node-stride" # need to explore custom stride during sweeps
+# Should be transferred to coupling.yaml 
+# work_conservative_mode: true
+# work_conservation_mode: true
+
+# striding parameters - coupling.yaml
+# span_sampling_mode: "node-stride" # need to explore custom stride during sweeps
 
 
-# Work conservation operator parameters
-rbf_radius: 0.08
-rbf_neighbors: 24
-max_abs_force_component: 5.0e3 # clipping? @neeraj pls check this by making it high
-enforce_chord_projection: false
-enforce_span_projection: false
+# Work conservation operator parameters - same in coupling.yaml
+# rbf_radius: 0.08
+# rbf_neighbors: 24
+# max_abs_force_component: 5.0e3 # clipping? @neeraj pls check this by making it high
+# enforce_chord_projection: false
+# enforce_span_projection: false
 
 # output paths
 results_root: results
