@@ -70,6 +70,7 @@ end
 AOA = parse(Float64, get(ENV, "FLUID_AOA_DEG", "8.0"))
 magVinf = parse(Float64, get(ENV, "FLUID_VINF", "8.0"))
 rho = parse(Float64, get(ENV, "FLUID_RHO", "1.0"))
+nu = parse(Float64, get(ENV, "FLUID_NU", "1.0e-6"))
 DEBUG_IO = lowercase(get(ENV, "COUPLING_DEBUG_IO", "0")) ∉ ("0", "false", "no")
 
 # Match solid coordinate system: x=chord, y=span, z=normal displacement.
@@ -167,7 +168,7 @@ end
 Vinf(X, t) = magVinf * [cosd(AOA), 0.0, sind(AOA)]
 
 println(
-    "Fluid v9 config: AoA=$(AOA) deg, U=$(magVinf) m/s, rho=$(rho), span=$(span), " *
+    "Fluid v9 config: AoA=$(AOA) deg, U=$(magVinf) m/s, rho=$(rho), nu=$(nu), span=$(span), " *
     "n_span=$(n_span), nsteps=$(nsteps), dt=$(dt), p_per_step=$(p_per_step)"
 )
 
@@ -204,6 +205,7 @@ simulation = uns.Simulation(
     Vinit=zeros(3), Winit=zeros(3)
 )
 
+###############################################################################
 repo_root = normpath(joinpath(@__DIR__, ".."))
 save_path = normpath(joinpath(repo_root, "results", "fluid", "v9"))
 run_name = "fluid_v9"
@@ -246,6 +248,8 @@ vpm_fmm_settings = vpm.FMM(
     default_rho_over_sigma=1.0,
     min_ncrit=3
 )
+
+vpm_viscous = vpm.CoreSpreading(nu, sigma_vpm_overwrite, 1.0)
 
 println(
     "Shedding config v9: spanwise-only wing, n_span=$(n_span), " *
@@ -768,6 +772,7 @@ uns.run_simulation(simulation, nsteps;
     sigma_rotor_surf=sigma_vlm_surf,
     sigma_vpm_overwrite=sigma_vpm_overwrite,
     vpm_fmm=vpm_fmm_settings,
+    vpm_viscous = vpm_viscous,
     shed_starting=shed_starting,
     shed_unsteady=use_unsteady_shedding,
     unsteady_shedcrit=unsteady_shedcrit,
