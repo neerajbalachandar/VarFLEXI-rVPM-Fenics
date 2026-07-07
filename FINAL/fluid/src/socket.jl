@@ -12,8 +12,11 @@ function read_json_line(sock::TCPSocket, tag::String)
     return JSON.parse(s)
 end
 
-println("Connecting to coupling server...")
-sock = connect(get(ENV, "COUPLING_HOST", "127.0.0.1"), parse(Int, get(ENV, "COUPLING_PORT", "9000")))
-write(sock, JSON.json(Dict("role" => "fluid")) * "\n")
-flush(sock)
-println("Fluid connected.")
+function connect_to_server(host::String, port::Int)
+    println("Connecting to coupling server at $(host):$(port)...")
+    sock = connect(host, port)
+    write(sock, JSON.json(Dict("role" => "fluid")) * "\n")
+    flush(sock)
+    println("Fluid connected.")
+    return sock
+end
