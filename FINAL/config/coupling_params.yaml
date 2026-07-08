@@ -21,6 +21,7 @@ span_sampling_mode: "node-stride" # need to explore custom stride during sweeps
 custom_span_stride: None
 
 # Work conservation operator parameters - same in coupling.yaml
+force_transfer_mode: "rbf" # options: "rbf" or "crm"
 rbf_radius: 0.08
 rbf_neighbors: 24
 max_abs_force_component: 5.0e3 # clipping? @neeraj pls check this by making it high

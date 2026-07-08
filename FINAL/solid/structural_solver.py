@@ -7,8 +7,8 @@ import socket
 import numpy as np
 import yaml
 
-from utils import CouplingTransfer, SolidDomain, ReissnerMindlinModel
-
+from utils import SolidDomain, ReissnerMindlinModel
+from coupling.utils.coupling_transfer import CouplingTransfer
 
 parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
@@ -174,6 +174,9 @@ class StructuralSolver:
             model=self.model,
             eta_span_comm=self.eta_span_comm,
             eta_cp=self.eta_cp,
+            force_transfer_mode=cfg_get(
+                self.coupling_config, "force_transfer_mode", default="rbf"
+            ),
             rbf_radius=cfg_get(self.coupling_config, "rbf_radius", default=0.08),
             rbf_neighbors=cfg_get(self.coupling_config, "rbf_neighbors", default=24),
             max_abs_force_component=cfg_get(
@@ -185,6 +188,8 @@ class StructuralSolver:
             enforce_span_projection=self.enforce_span_projection,
             debug_io=self.DEBUG_IO,
         )
+        self.force_transfer_mode = self.transfer.force_transfer_mode
+        print(f"Solid force transfer mode: {self.force_transfer_mode}")
         self.crm_transfer_matrix = self.transfer.crm_transfer_matrix
         self.crm_panel_areas = self.transfer.crm_panel_areas
         self.crm_panel_polys = self.transfer.crm_panel_polys
@@ -358,19 +363,12 @@ class StructuralSolver:
 
             nodal_forces = None
             Fs_coeff = None
-            if self.work_conservative_mode:
-                Fs_coeff, nodal_forces = self.transfer.apply_Tf_operator(
-                    forces_eff,
-                    len(self.interface_node_ids),
-                    self.nbr_ids,
-                    self.nbr_w,
-                    self.A_diag,
-                    self.S_lumped,
-                )
-                if not np.isfinite(nodal_forces).all():
-                    raise RuntimeError(
-                        f"Non-finite mapped nodal forces at solid step {i_step + 1}"
-                    )
+            if self.force_transfer_mode == "crm":
+                _, nodal_forces = self.transfer.apply_force_transfer(forces_eff)
+            else:
+                Fs_coeff, nodal_forces = self.transfer.apply_force_transfer(forces_eff)
+            if not np.isfinite(nodal_forces).all():
+                raise RuntimeError(f"Non-finite mapped nodal forces at solid step {i_step + 1}")
 
             ext_force_vec = self.ext_force_vec_template.copy()
             ext_force_vec.zero()
@@ -386,7 +384,7 @@ class StructuralSolver:
 
             self._solve_newton_step(ext_force_vec)
 
-            if self.work_conservative_mode and nodal_forces is not None and Fs_coeff is not None:
+            if self.work_conservative_mode and nodal_forces is not None:
                 interface_disp_prev = self.transfer.get_nodal_displacements_plate(
                     self.model.q_old,
                     self.interface_node_ids,
@@ -394,14 +392,23 @@ class StructuralSolver:
                     self.dofs_u_y,
                     self.dofs_w,
                 )
-                u_cp_prev = self.transfer.sample_vector_field_at_targets(
-                    self.model.q_old,
-                    self.cp_targets,
-                    fallback_tree=self.interface_tree,
-                    fallback_vals=interface_disp_prev,
-                )
-                Wf = float(np.sum(u_cp_prev * (forces_eff * self.A_diag[:, None])))
-                Ws = float(np.sum(interface_disp_prev * (Fs_coeff * self.S_lumped[:, None])))
+                if self.force_transfer_mode == "crm":
+                    u_panel_prev = self.transfer.nodal_displacements_to_panel_average(
+                        interface_disp_prev,
+                        self.crm_transfer_matrix,
+                        self.crm_panel_areas,
+                    )
+                    Wf = float(np.sum(u_panel_prev * (forces_eff * self.A_diag[:, None])))
+                    Ws = float(np.sum(interface_disp_prev * nodal_forces))
+                else:
+                    u_cp_prev = self.transfer.sample_vector_field_at_targets(
+                        self.model.q_old,
+                        self.cp_targets,
+                        fallback_tree=self.interface_tree,
+                        fallback_vals=interface_disp_prev,
+                    )
+                    Wf = float(np.sum(u_cp_prev * (forces_eff * self.A_diag[:, None])))
+                    Ws = float(np.sum(interface_disp_prev * (Fs_coeff * self.S_lumped[:, None])))
                 rel_work_err = abs(Wf - Ws) / max(abs(Wf), abs(Ws), 1.0e-16)
                 self.work_rel_errors[i_step] = rel_work_err
                 self.work_Wf[i_step] = Wf

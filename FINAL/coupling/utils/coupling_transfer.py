@@ -2,6 +2,9 @@ from dolfin import *
 import numpy as np
 from scipy.spatial import cKDTree
 
+from .common_refinement_mesh import CommonRefinementMesh
+from .rbf_transfer import RBFTransfer
+
 
 class CouplingTransfer:
     """Coupling-side geometry, sampling, and transfer operators."""
@@ -12,6 +15,7 @@ class CouplingTransfer:
         model,
         eta_span_comm,
         eta_cp,
+        force_transfer_mode="rbf",
         rbf_radius=0.08,
         rbf_neighbors=24,
         max_abs_force_component=5.0e3,
@@ -23,6 +27,12 @@ class CouplingTransfer:
     ):
         self.domain = domain
         self.model = model
+        self.force_transfer_mode = str(force_transfer_mode).strip().lower()
+        if self.force_transfer_mode not in ("crm", "rbf"):
+            raise ValueError(
+                f"Unsupported force_transfer_mode '{force_transfer_mode}'. "
+                "Expected 'crm' or 'rbf'."
+            )
         self.eta_span_comm = np.asarray(eta_span_comm, dtype=float).reshape(-1)
         self.eta_cp = float(eta_cp)
         self.eta_cp_comm = np.array([self.eta_cp], dtype=float)
@@ -46,18 +56,33 @@ class CouplingTransfer:
         self.te_targets = self.domain.build_spanwise_targets(
             self.eta_span_comm, 1.0, xi_eps=self.edge_eval_xi_eps
         )
-        self.crm_transfer_matrix, self.crm_panel_areas, self.crm_panel_polys = (
-            self.build_common_refinement_operator()
-        )
 
-        cp_targets_2d = self.cp_targets[:, :2]
-        self.nbr_ids, self.nbr_w = self.build_local_rbf_map(
-            cp_targets_2d, self.interface_coords, self.rbf_radius, n_neighbors=self.rbf_neighbors
-        )
+        self.crm_backend = CommonRefinementMesh(self.domain, self.eta_span_comm)
+        self.rbf_backend = None
+        self.crm_transfer_matrix = None
+        self.crm_panel_areas = None
+        self.crm_panel_polys = None
+        self.nbr_ids = None
+        self.nbr_w = None
         self.A_diag = np.ones((self.cp_targets.shape[0],), dtype=float)
-        self.S_lumped = self.compute_S_lumped(
-            len(self.interface_node_ids), self.nbr_ids, self.nbr_w, self.A_diag
-        )
+        self.S_lumped = None
+
+        if self.force_transfer_mode == "crm":
+            self.crm_transfer_matrix, self.crm_panel_areas, self.crm_panel_polys = (
+                self.crm_backend.build_common_refinement_operator()
+            )
+        else:
+            cp_targets_2d = self.cp_targets[:, :2]
+            self.rbf_backend = RBFTransfer(
+                cp_targets_2d,
+                self.interface_coords,
+                self.rbf_radius,
+                n_neighbors=self.rbf_neighbors,
+                A_diag=self.A_diag,
+            )
+            self.nbr_ids = self.rbf_backend.nbr_ids
+            self.nbr_w = self.rbf_backend.nbr_w
+            self.S_lumped = self.rbf_backend.S_lumped
 
     def get_aero_surface_node_ids(self):
         v_w = self.model.V.sub(1).collapse()
@@ -248,206 +273,67 @@ class CouplingTransfer:
                 out[k_idx, :] = fallback_vals[int(idx), :]
         return out
 
-    def span_edges_from_stations(self, eta_span_vals):
-        eta = np.asarray(eta_span_vals, dtype=float).reshape(-1)
-        if len(eta) == 0:
-            raise ValueError("eta_span_vals must contain at least one station")
-        if len(eta) == 1:
-            return np.array([0.0, 1.0], dtype=float)
+    def apply_force_transfer(self, forces):
+        if self.force_transfer_mode == "crm":
+            nodal_forces = self.crm_backend.panel_loads_to_solid_nodal_forces(
+                forces, self.crm_transfer_matrix, self.crm_panel_areas
+            )
+            return None, nodal_forces
+        if self.rbf_backend is None:
+            raise RuntimeError("RBF backend is not initialized")
+        return self.rbf_backend.apply(forces)
 
-        edges = np.zeros((len(eta) + 1,), dtype=float)
-        edges[0] = 0.0
-        edges[-1] = 1.0
-        edges[1:-1] = 0.5 * (eta[:-1] + eta[1:])
-        edges = np.clip(edges, 0.0, 1.0)
-        edges = np.maximum.accumulate(edges)
-        edges[-1] = 1.0
-        return edges
+    def span_edges_from_stations(self, eta_span_vals):
+        return self.crm_backend.span_edges_from_stations(eta_span_vals)
 
     def panel_polygon_for_span_interval(self, y0, y1):
-        x0_le = self.domain.x_leading_edge_at(y0)
-        x0_te = x0_le + self.domain.chord_at(y0)
-        x1_le = self.domain.x_leading_edge_at(y1)
-        x1_te = x1_le + self.domain.chord_at(y1)
-        return np.array([[x0_le, y0], [x0_te, y0], [x1_te, y1], [x1_le, y1]], dtype=float)
+        return self.crm_backend.panel_polygon_for_span_interval(y0, y1)
 
     @staticmethod
     def polygon_area(poly):
-        poly = np.asarray(poly, dtype=float)
-        if len(poly) < 3:
-            return 0.0
-        x = poly[:, 0]
-        y = poly[:, 1]
-        return 0.5 * float(np.abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+        return CommonRefinementMesh.polygon_area(poly)
 
     @staticmethod
     def polygon_centroid(poly):
-        poly = np.asarray(poly, dtype=float)
-        if len(poly) == 0:
-            return np.zeros((2,), dtype=float)
-        return np.mean(poly, axis=0)
+        return CommonRefinementMesh.polygon_centroid(poly)
 
     @staticmethod
     def is_inside_halfplane(p, a, b, eps=1.0e-14):
-        return ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])) >= -eps
+        return CommonRefinementMesh.is_inside_halfplane(p, a, b, eps=eps)
 
     @staticmethod
     def line_intersection(p1, p2, a, b):
-        x1, y1 = p1
-        x2, y2 = p2
-        x3, y3 = a
-        x4, y4 = b
-        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-        if abs(denom) < 1.0e-16:
-            return p2.copy()
-        px = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denom
-        py = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denom
-        return np.array([px, py], dtype=float)
+        return CommonRefinementMesh.line_intersection(p1, p2, a, b)
 
     def clip_polygon_to_convex(self, poly, clip_poly):
-        poly = [np.asarray(p, dtype=float) for p in np.asarray(poly, dtype=float)]
-        clip_poly = np.asarray(clip_poly, dtype=float)
-        if len(poly) == 0:
-            return np.zeros((0, 2), dtype=float)
-        for i in range(len(clip_poly)):
-            a = clip_poly[i]
-            b = clip_poly[(i + 1) % len(clip_poly)]
-            if len(poly) == 0:
-                break
-            out = []
-            prev = poly[-1]
-            prev_inside = self.is_inside_halfplane(prev, a, b)
-            for cur in poly:
-                cur_inside = self.is_inside_halfplane(cur, a, b)
-                if cur_inside:
-                    if not prev_inside:
-                        out.append(self.line_intersection(prev, cur, a, b))
-                    out.append(cur)
-                elif prev_inside:
-                    out.append(self.line_intersection(prev, cur, a, b))
-                prev = cur
-                prev_inside = cur_inside
-            poly = out
-        if len(poly) == 0:
-            return np.zeros((0, 2), dtype=float)
-        return np.asarray(poly, dtype=float)
+        return self.crm_backend.clip_polygon_to_convex(poly, clip_poly)
 
     @staticmethod
     def barycentric_coords_triangle(p, tri):
-        a = tri[0]
-        b = tri[1]
-        c = tri[2]
-        v0 = b - a
-        v1 = c - a
-        v2 = p - a
-        denom = v0[0] * v1[1] - v1[0] * v0[1]
-        if abs(denom) < 1.0e-16:
-            return None
-        l2 = (v2[0] * v1[1] - v1[0] * v2[1]) / denom
-        l3 = (v0[0] * v2[1] - v2[0] * v0[1]) / denom
-        l1 = 1.0 - l2 - l3
-        return np.array([l1, l2, l3], dtype=float)
+        return CommonRefinementMesh.barycentric_coords_triangle(p, tri)
 
     @staticmethod
     def cg1_triangle_basis(bary):
-        return np.asarray(bary, dtype=float)
+        return CommonRefinementMesh.cg1_triangle_basis(bary)
 
     @staticmethod
     def triangle_quadrature_rule():
-        bary = np.array(
-            [[1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0], [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0], [2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0]],
-            dtype=float,
-        )
-        weights = np.array([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], dtype=float)
-        return bary, weights
+        return CommonRefinementMesh.triangle_quadrature_rule()
 
     @staticmethod
     def triangulate_polygon_fan(poly):
-        poly = np.asarray(poly, dtype=float)
-        if len(poly) < 3:
-            return []
-        base = poly[0]
-        tris = []
-        for i in range(1, len(poly) - 1):
-            tris.append(np.array([base, poly[i], poly[i + 1]], dtype=float))
-        return tris
+        return CommonRefinementMesh.triangulate_polygon_fan(poly)
 
     def build_common_refinement_operator(self):
-        eta_span_vals = self.eta_span_comm
-        if len(eta_span_vals) == 0:
-            raise ValueError("No span stations supplied to CRM operator")
-
-        span_edges = self.span_edges_from_stations(eta_span_vals)
-        panel_polys = []
-        panel_areas = np.zeros((len(eta_span_vals),), dtype=float)
-        for i_idx in range(len(eta_span_vals)):
-            y0 = span_edges[i_idx] * self.domain.span
-            y1 = span_edges[i_idx + 1] * self.domain.span
-            poly = self.panel_polygon_for_span_interval(y0, y1)
-            panel_polys.append(poly)
-            panel_areas[i_idx] = max(self.polygon_area(poly), 1.0e-14)
-
-        trial_space = FunctionSpace(self.domain.mesh, "CG", 1)
-        dofmap = trial_space.dofmap()
-        ndofs = trial_space.dim()
-        n_panels = len(eta_span_vals)
-        C = np.zeros((ndofs, n_panels), dtype=float)
-
-        bary_rule, bary_weights = self.triangle_quadrature_rule()
-        for cell in cells(self.domain.mesh):
-            cell_index = cell.index()
-            vert_ids = cell.entities(0)
-            tri = self.domain.mesh.coordinates()[vert_ids, :2]
-            tri_min = np.min(tri, axis=0)
-            tri_max = np.max(tri, axis=0)
-            local_dofs = dofmap.cell_dofs(cell_index)
-
-            for j_idx, panel_poly in enumerate(panel_polys):
-                panel_min = np.min(panel_poly, axis=0)
-                panel_max = np.max(panel_poly, axis=0)
-                if tri_max[0] < panel_min[0] - 1.0e-14 or tri_min[0] > panel_max[0] + 1.0e-14:
-                    continue
-                if tri_max[1] < panel_min[1] - 1.0e-14 or tri_min[1] > panel_max[1] + 1.0e-14:
-                    continue
-
-                clipped = self.clip_polygon_to_convex(tri, panel_poly)
-                if len(clipped) < 3:
-                    continue
-
-                clipped_centroid = self.polygon_centroid(clipped)
-                if not np.all(np.isfinite(clipped_centroid)):
-                    continue
-
-                for subtri in self.triangulate_polygon_fan(clipped):
-                    sub_area = self.polygon_area(subtri)
-                    if sub_area <= 1.0e-16:
-                        continue
-                    for k_idx in range(3):
-                        bary_sub = bary_rule[k_idx]
-                        p = (
-                            bary_sub[0] * subtri[0]
-                            + bary_sub[1] * subtri[1]
-                            + bary_sub[2] * subtri[2]
-                        )
-                        bary_tri = self.barycentric_coords_triangle(p, tri)
-                        if bary_tri is None:
-                            continue
-                        phi = self.cg1_triangle_basis(bary_tri)
-                        wq = sub_area * bary_weights[k_idx]
-                        C[local_dofs, j_idx] += wq * phi
-
-        return C, panel_areas, panel_polys
+        return self.crm_backend.build_common_refinement_operator()
 
     @staticmethod
     def panel_loads_to_solid_nodal_forces(panel_forces, C, panel_areas):
-        panel_forces = np.asarray(panel_forces, dtype=float).reshape(-1, 3)
-        densities = panel_forces / panel_areas[:, None]
-        return C @ densities
+        return CommonRefinementMesh.panel_loads_to_solid_nodal_forces(panel_forces, C, panel_areas)
 
     @staticmethod
     def nodal_displacements_to_panel_average(nodal_disp, C, panel_areas):
-        nodal_disp = np.asarray(nodal_disp, dtype=float).reshape(-1, 3)
-        return (C.T @ nodal_disp) / panel_areas[:, None]
+        return CommonRefinementMesh.nodal_displacements_to_panel_average(nodal_disp, C, panel_areas)
 
     @staticmethod
     def project_le_te_inextensible(u_le_arr, u_te_arr, le_ref, te_ref):
@@ -513,59 +399,19 @@ class CouplingTransfer:
         return u_proj, seg_cur_len, seg_ref_len
 
     def build_local_rbf_map(self, fluid_points, solid_points, radius, n_neighbors=24):
-        fluid_points = np.asarray(fluid_points, dtype=float)
-        solid_points = np.asarray(solid_points, dtype=float)
-        support_radius = float(radius)
-        if support_radius <= 0.0:
-            raise ValueError("COUPLING_RBF_RADIUS must be positive for compact RBF transfer")
-        n_s = solid_points.shape[0]
-        k = int(max(1, min(n_neighbors, n_s)))
-
-        tree = cKDTree(solid_points)
-        dists, idx = tree.query(fluid_points, k=k)
-        if k == 1:
-            dists = dists.reshape(-1, 1)
-            idx = idx.reshape(-1, 1)
-
-        nbr_ids = idx.astype(np.int64)
-        q = dists / support_radius
-        nbr_w = np.zeros_like(dists, dtype=float)
-        inside = q < 1.0
-        one_minus_q = 1.0 - q[inside]
-        nbr_w[inside] = (one_minus_q ** 4) * (4.0 * q[inside] + 1.0)
-
-        row_sum = np.sum(nbr_w, axis=1, keepdims=True)
-        bad = np.where(row_sum[:, 0] <= 1.0e-16)[0]
-        for bi in bad:
-            nbr_w[bi, :] = 0.0
-            nbr_w[bi, 0] = 1.0
-        row_sum = np.sum(nbr_w, axis=1, keepdims=True)
-        nbr_w /= np.maximum(row_sum, 1.0e-16)
-        return nbr_ids, nbr_w
+        return RBFTransfer.build_local_rbf_map(fluid_points, solid_points, radius, n_neighbors=n_neighbors)
 
     @staticmethod
     def map_forces_to_solid(f_fluid, n_solid_nodes, nbr_ids, nbr_w):
-        n_f, k = nbr_ids.shape
-        out = np.zeros((n_solid_nodes, 3), dtype=float)
-        for q_idx in range(k):
-            contrib = nbr_w[:, q_idx : q_idx + 1] * f_fluid
-            np.add.at(out, nbr_ids[:, q_idx], contrib)
-        return out
+        return RBFTransfer.map_forces_to_solid(f_fluid, n_solid_nodes, nbr_ids, nbr_w)
 
     @staticmethod
     def compute_S_lumped(n_solid_nodes, nbr_ids, nbr_w, A_diag):
-        _n_f, k = nbr_ids.shape
-        S = np.zeros((n_solid_nodes,), dtype=float)
-        for q_idx in range(k):
-            np.add.at(S, nbr_ids[:, q_idx], nbr_w[:, q_idx] * A_diag)
-        return np.maximum(S, 1.0e-14)
+        return RBFTransfer.compute_S_lumped(n_solid_nodes, nbr_ids, nbr_w, A_diag)
 
     @classmethod
     def apply_Tf_operator(cls, Fa, n_solid_nodes, nbr_ids, nbr_w, A_diag, S_lumped):
-        FaA = Fa * A_diag[:, None]
-        rhs = cls.map_forces_to_solid(FaA, n_solid_nodes, nbr_ids, nbr_w)
-        Fs_coeff = rhs / S_lumped[:, None]
-        return Fs_coeff, rhs
+        return RBFTransfer.apply_Tf_operator(Fa, n_solid_nodes, nbr_ids, nbr_w, A_diag, S_lumped)
 
     @staticmethod
     def add_nodal_forces_to_rhs_plate(rhs_vec, nodal_forces, node_ids, dofs_u_x, dofs_u_y, dofs_w):
@@ -586,4 +432,4 @@ class CouplingTransfer:
         return out
 
 
-__all__ = ["SolidCouplingTransfer"]
+__all__ = ["CouplingTransfer"]
