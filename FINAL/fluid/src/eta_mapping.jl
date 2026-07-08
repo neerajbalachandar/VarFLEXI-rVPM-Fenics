@@ -1,4 +1,4 @@
-function build_coupling_eta_span(nspan::Int, ny_solid::Int, mode::String)
+function build_coupling_eta_span(nspan::Int, ny_solid::Int, mode::String; custom_stride::Union{Nothing,Int}=nothing)
     nspan < 1 && error("COUPLING_NSPAN_COMM/FLUID_N_SPAN must be >= 1")
     nspan == 1 && return [0.0]
 
@@ -12,9 +12,9 @@ function build_coupling_eta_span(nspan::Int, ny_solid::Int, mode::String)
         end
         return [idx_i / max(float(ny_solid), 1.0) for idx_i in idx]
     elseif mode == "custom-stride"
-        isempty(custom_span_stride_raw) &&
+        custom_stride === nothing &&
             error("COUPLING_SPAN_SAMPLING=custom-stride requires COUPLING_SPAN_STRIDE")
-        stride = parse(Int, custom_span_stride_raw)
+        stride = custom_stride
         stride < 1 && error("COUPLING_SPAN_STRIDE must be >= 1")
         last_idx = (nspan - 1) * stride
         last_idx > ny_solid && error(
@@ -30,11 +30,11 @@ function build_coupling_eta_span(nspan::Int, ny_solid::Int, mode::String)
     error("Unsupported COUPLING_SPAN_SAMPLING=$(mode)")
 end
 
-function assert_eta_close(name::String, a::Vector{Float64}, b::Vector{Float64}; tol=1.0e-10)
+function assert_eta_close(name::String, a::Vector{Float64}, b::Vector{Float64}; mode::String="", tol=1.0e-10)
     length(a) == length(b) || error("$(name) length mismatch: $(length(a)) vs $(length(b))")
     err = maximum(abs.(a .- b))
     err <= tol || error(
-        "$(name) mismatch for COUPLING_SPAN_SAMPLING=$(span_sampling_mode): " *
+        "$(name) mismatch for COUPLING_SPAN_SAMPLING=$(mode): " *
         "max |eta_a-eta_b| = $(err). The fluid VLM station locations must match " *
         "the coupling eta grid; otherwise forces are labeled at the wrong span stations."
     )

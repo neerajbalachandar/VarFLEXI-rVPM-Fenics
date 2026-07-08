@@ -2,6 +2,8 @@
 
 struct SolverConfig
 
+    run_name::String
+
     aoa::Float64
     vinf::Float64
     rho::Float64
@@ -19,6 +21,33 @@ struct SolverConfig
 
     sigma_vlm_solver::Float64
     sigma_vlm_surface::Float64
+
+    n_span::Int
+    n_chord::Int
+    eta_cp::Float64
+    eta_bv::Float64
+
+    span::Float64
+    root_chord::Float64
+    tip_chord::Float64
+    leading_edge_sweep::Float64
+    twist_root::Float64
+    twist_tip::Float64
+    dihedral::Float64
+
+    disp_scale_x::Float64
+    disp_scale_y::Float64
+    disp_scale_z::Float64
+
+    save_path::String
+    create_savepath::Bool
+    prompt::Bool
+    nsteps_save::Int
+    save_horseshoes::Bool
+    save_geometry_csv::Bool
+    use_ftot_force::Bool
+    debug_io::Bool
+    regularize_vlm::Bool
 
 end
 
@@ -38,6 +67,21 @@ struct WakeConfig
     shed_unsteady::Bool
 
     unsteady_shedcrit::Float64
+    wake_coupled::Bool
+
+    fmm_p::Int
+    fmm_ncrit::Int
+    fmm_theta::Float64
+    fmm_shrink_recenter::Bool
+    fmm_relative_tolerance::Float64
+    fmm_absolute_tolerance::Float64
+    fmm_autotune_p::Bool
+    fmm_autotune_ncrit::Bool
+    fmm_autotune_regularization::Bool
+    fmm_default_rho_over_sigma::Float64
+    fmm_minimum_ncrit::Int
+
+    viscous_scheme::String
 
 end
 
