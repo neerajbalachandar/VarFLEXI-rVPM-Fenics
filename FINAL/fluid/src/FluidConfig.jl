@@ -62,7 +62,14 @@ function cfg_get(cfg::Dict{String, Any}, key::String, default; duplicate::Symbol
 end
 
 as_float(cfg, key, default; duplicate::Symbol=:last) = Float64(cfg_get(cfg, key, default; duplicate=duplicate))
-as_int(cfg, key, default; duplicate::Symbol=:last) = Int(cfg_get(cfg, key, default; duplicate=duplicate))
+# as_int(cfg, key, default; duplicate::Symbol=:last) = Int(cfg_get(cfg, key, default; duplicate=duplicate))
+function as_int(cfg, key, default; duplicate::Symbol=:last)
+    val = cfg_get(cfg, key, default; duplicate=duplicate)
+    println("KEY = $key")
+    println("TYPE = ", typeof(val))
+    println("VALUE = ", repr(val))
+    return Int(val)
+end
 as_bool(cfg, key, default; duplicate::Symbol=:last) = Bool(cfg_get(cfg, key, default; duplicate=duplicate))
 as_string(cfg, key, default; duplicate::Symbol=:last) = String(cfg_get(cfg, key, default; duplicate=duplicate))
 

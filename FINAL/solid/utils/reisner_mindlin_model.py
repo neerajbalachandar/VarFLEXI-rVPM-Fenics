@@ -1,6 +1,8 @@
 from dolfin import *
 import numpy as np
 
+# from FINAL.solid.elastodynamics_reisner_span_for_validation import left
+
 from .generalized_alpha import GeneralizedAlphaIntegrator
 
 
@@ -39,7 +41,8 @@ class ReissnerMindlinModel:
         self._build_spaces()
         self._build_state()
         self._build_bcs()
-        self._build_forms()
+        # self._build_forms() # Commented and check out what is the fault here, added the below line to correct as it was similar. where is the defn?
+        self.build_residual_forms()
 
     def _build_spaces(self):
         mesh = self.domain.mesh
@@ -65,9 +68,29 @@ class ReissnerMindlinModel:
 
     def _build_bcs(self):
         u_zero_2d = Constant((0.0, 0.0))
-        self.bc_u = DirichletBC(self.V.sub(0), u_zero_2d, self.domain.is_left_boundary)
-        self.bc_w = DirichletBC(self.V.sub(1), Constant(0.0), self.domain.is_left_boundary)
-        self.bc_theta = DirichletBC(self.V.sub(2), u_zero_2d, self.domain.is_left_boundary)
+
+        # print("========== BC DEBUG ==========")
+        # print("V              :", self.V)
+        # print("V.sub(0)       :", self.V.sub(0))
+        # print("V.sub(1)       :", self.V.sub(1))
+        # print("V.sub(2)       :", self.V.sub(2))
+        # print("u_zero_2d      :", u_zero_2d)
+        # print("is_left_boundary:", self.domain.is_left_boundary)
+        # print("type:", type(self.domain.is_left_boundary))
+        # print("==============================")
+        
+        
+        # self.bc_u = DirichletBC(self.V.sub(0), u_zero_2d, self.domain.is_left_boundary)     
+        # self.bc_w = DirichletBC(self.V.sub(1), Constant(0.0), self.domain.is_left_boundary)
+        # self.bc_theta = DirichletBC(self.V.sub(2), u_zero_2d, self.domain.is_left_boundary)
+
+# Why is left BC import failing previously?
+        left = CompiledSubDomain("near(x[1], 0.0) && on_boundary")
+
+        self.bc_u = DirichletBC(self.V.sub(0), Constant((0.0, 0.0)), left)
+        self.bc_w = DirichletBC(self.V.sub(1), Constant(0.0), left)
+        self.bc_theta = DirichletBC(self.V.sub(2), Constant((0.0, 0.0)), left)
+
         self.bcs = [self.bc_u, self.bc_w, self.bc_theta]
 
     def split_state(self, q_fun):

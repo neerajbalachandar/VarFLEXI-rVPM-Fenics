@@ -1,3 +1,8 @@
+# using Pkg
+
+# Pkg.activate(joinpath(@__DIR__,"..", "..", ".."))
+# Pkg.instantiate()
+
 using Sockets
 using JSON
 using LinearAlgebra
@@ -6,9 +11,6 @@ import FLOWUnsteady as uns
 import FLOWVLM as vlm
 import FLOWVPM as vpm
 
-using Pkg
-
-Pkg.activate(joinpath(@__DIR__,".."))
 
 include("src/FluidTypes.jl")
 include("src/FluidConfig.jl")

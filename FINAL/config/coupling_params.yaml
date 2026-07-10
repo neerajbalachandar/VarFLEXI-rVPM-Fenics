@@ -18,7 +18,7 @@ work_conservation_mode: true
 
 # striding parameters - coupling.yaml
 span_sampling_mode: "node-stride" # need to explore custom stride during sweeps
-custom_span_stride: None
+custom_span_stride: null
 
 # Work conservation operator parameters - same in coupling.yaml
 force_transfer_mode: "rbf" # options: "rbf" or "crm"

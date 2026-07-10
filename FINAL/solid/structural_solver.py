@@ -1,3 +1,11 @@
+import os
+import sys
+
+print("cwd =", os.getcwd())
+print("sys.path =")
+for p in sys.path:
+    print(" ", p)
+
 from dolfin import *
 import argparse
 import json
