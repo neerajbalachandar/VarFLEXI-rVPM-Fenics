@@ -17,9 +17,6 @@ torch_extensions/
 fluid-rvpm/fluid-result
 airfoil_output
 
-solid-fenics/solid-fenics/results/elastodynamics-results.h5
-solid-fenics/solid-fenics/results/elastodynamics-results.xdmf
-
 output
 results
 .codex
