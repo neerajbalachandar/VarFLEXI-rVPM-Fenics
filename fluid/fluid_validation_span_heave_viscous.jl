@@ -9,7 +9,7 @@ using Statistics
 
 function wing_maneuver(;
     disp_plot=true,
-    vehicle_velocity::Real=4.43,
+    vehicle_velocity::Real=0.30,
     angle_of_attack::Real=0.0)
 
     chord = 0.1
@@ -274,8 +274,8 @@ simulation = uns.Simulation(
 )
 
 repo_root = normpath(joinpath(@__DIR__, ".."))
-save_path = normpath(joinpath(repo_root, "results", "fluid", "v9"))
-run_name = "fluid_v9"
+save_path = normpath(joinpath(repo_root, "results_tipdisp_flex", "fluid"))
+run_name = "fluid_val_2"
 mkpath(save_path)
 
 # max_particles = Int((nsteps + 1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step + 1) + p_per_step))

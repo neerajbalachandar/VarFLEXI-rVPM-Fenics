@@ -12,8 +12,8 @@ parameters["form_compiler"]["cpp_optimize"] = True
 parameters["form_compiler"]["optimize"] = True
 
 
-T = float(os.getenv("COUPLING_TTOT", "46"))
-Nsteps = int(os.getenv("COUPLING_NSTEPS", "9000"))
+T = float(os.getenv("COUPLING_TTOT", "15"))
+Nsteps = int(os.getenv("COUPLING_NSTEPS", "3000"))
 dt_value = T / Nsteps
 dt = Constant(dt_value)
 
@@ -180,7 +180,7 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0, shape=(2, 2))
 
 t_aero = Function(Vt, name="AerodynamicTraction")
 
-E = float(os.getenv("SOLID_E", "5.0e9"))
+E = float(os.getenv("SOLID_E", "3.4e9")) # 5 to 4 to 2.5
 nu = float(os.getenv("SOLID_NU", "0.35"))
 rho_s = float(os.getenv("SOLID_RHO", "1100.0"))
 rho = Constant(rho_s)
@@ -867,7 +867,7 @@ def get_nodal_displacements_plate(q_fun, node_ids, dofs_u_x, dofs_u_y, dofs_w):
 sig = Function(Vsig, name="MembraneStress")
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-out_dir = os.path.join(repo_root, "results", "solid", "v18_reissner_mindlin_plate")
+out_dir = os.path.join(repo_root, "results", "results_tipdisp_flex", "solid")
 os.makedirs(out_dir, exist_ok=True)
 
 # =====================================================================
