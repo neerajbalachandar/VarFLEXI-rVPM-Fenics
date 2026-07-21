@@ -274,7 +274,7 @@ simulation = uns.Simulation(
 )
 
 repo_root = normpath(joinpath(@__DIR__, ".."))
-save_path = normpath(joinpath(repo_root, "results_tipdisp_flex", "fluid"))
+save_path = normpath(joinpath(repo_root, "results_tipdisp_inflex", "fluid"))
 run_name = "fluid_val_2"
 mkpath(save_path)
 
