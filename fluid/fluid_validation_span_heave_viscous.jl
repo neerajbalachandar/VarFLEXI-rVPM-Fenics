@@ -14,7 +14,7 @@ function wing_maneuver(;
 
     chord = 0.1
 
-    kG = 1.82
+    kG = 1.90
 
     freq = kG * vehicle_velocity / (π * chord)
 
@@ -169,6 +169,8 @@ use_unsteady_shedding = true
 unsteady_shedcrit = 0.0
 vlm_rlx = 0.35
 
+# Make a balance for this
+
 geom_relax = parse(Float64, get(ENV, "FLUID_GEOM_RELAX", "0.8"))
 force_relax = parse(Float64, get(ENV, "FLUID_FORCE_RELAX", "0.8"))
 disp_scale_x = parse(Float64, get(ENV, "FLUID_DISP_SCALE_X", "1.0"))
@@ -274,7 +276,7 @@ simulation = uns.Simulation(
 )
 
 repo_root = normpath(joinpath(@__DIR__, ".."))
-save_path = normpath(joinpath(repo_root, "results_tipdisp_inflex", "fluid"))
+save_path = normpath(joinpath(repo_root, "results", "results_KG9_inflex", "fluid"))
 run_name = "fluid_val_2"
 mkpath(save_path)
 
@@ -954,7 +956,7 @@ uns.run_simulation(simulation, nsteps;
     run_name=run_name,
     create_savepath=false,
     prompt=false,
-    nsteps_save=20,
+    nsteps_save=5,
     save_horseshoes=true
 )
 

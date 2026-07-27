@@ -167,7 +167,7 @@ h = Constant(plate_thickness)
 # Reissner-Mindlin mixed element space:
 #   u_mem: membrane displacement (in-plane) [ux, uy] -> CG2
 #   w: transverse displacement -> CG2
-#   theta: plate rotations [theta_x, theta_y] -> CG2
+#   theta: plate rotations [theta_x, theta_y] -> CG2kG
 U_el = VectorElement("CG", mesh.ufl_cell(), 2, dim=2)
 W_el = FiniteElement("CG", mesh.ufl_cell(), 2)
 T_el = VectorElement("CG", mesh.ufl_cell(), 2, dim=2)
@@ -180,7 +180,7 @@ Vsig = TensorFunctionSpace(mesh, "DG", 0, shape=(2, 2))
 
 t_aero = Function(Vt, name="AerodynamicTraction")
 
-E = float(os.getenv("SOLID_E", "2.6e10")) # 5 to 4 to 2.5, 3.4;2.6
+E = float(os.getenv("SOLID_E", "2.6e10")) # 5 to 4 to 2.5e9, 3.4e9; 2.6e10
 nu = float(os.getenv("SOLID_NU", "0.35"))
 rho_s = float(os.getenv("SOLID_RHO", "1100.0"))
 rho = Constant(rho_s)
@@ -220,7 +220,7 @@ a_old = Function(V)
 Uinf = 0.30
 chord = 0.1
 
-kG = 1.82
+kG = 1.90
 
 freq = kG * Uinf / (np.pi * chord)
 
@@ -867,7 +867,7 @@ def get_nodal_displacements_plate(q_fun, node_ids, dofs_u_x, dofs_u_y, dofs_w):
 sig = Function(Vsig, name="MembraneStress")
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-out_dir = os.path.join(repo_root, "results", "results_tipdisp_inflex", "solid")
+out_dir = os.path.join(repo_root, "results", "results_KG9_inflex", "solid")
 os.makedirs(out_dir, exist_ok=True)
 
 # =====================================================================

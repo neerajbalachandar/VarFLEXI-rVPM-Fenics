@@ -78,7 +78,7 @@ while fluid_conn is None or solid_conn is None:
 print("Both participants connected.")
 
 repo_root = os.path.dirname(os.path.abspath(__file__))
-results_dir = os.path.join(repo_root, "results_tipdisp_inflex", "coupling")
+results_dir = os.path.join(repo_root, "results", "results_KG9_inflex", "coupling")
 os.makedirs(results_dir, exist_ok=True)
 log_csv = os.path.join(results_dir, "coupling_history.csv")
 log_fp = open(log_csv, "w", newline="")
