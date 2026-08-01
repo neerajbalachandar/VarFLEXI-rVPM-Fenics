@@ -79,6 +79,7 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     push!(drag_hist, drag)
     push!(cl_hist, cl)
     push!(cd_hist, cd)
+    push!(fluid_step_time_hist, fluid_step_time)
 
     println(
         force_trace_io,

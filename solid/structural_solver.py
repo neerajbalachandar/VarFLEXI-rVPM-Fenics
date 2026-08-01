@@ -274,6 +274,7 @@ class StructuralSolver:
         self.time = np.linspace(0.0, self.T, self.Nsteps + 1)
         self.u_tip = np.zeros((self.Nsteps + 1,), dtype=float)
         self.energies = np.zeros((self.Nsteps + 1, 4), dtype=float)
+        self.step_walltime = np.full((self.Nsteps,), np.nan, dtype=float)
         self.E_damp_acc = 0.0
         self.forces_prev = None
         self.work_rel_errors = np.full((self.Nsteps,), np.nan, dtype=float)
@@ -344,6 +345,8 @@ class StructuralSolver:
         self._send_initial_geometry()
 
         for i_step in range(self.Nsteps):
+            step_start = perf_counter()
+            solid_step_time = float("nan")
             print(f"Solid step {i_step + 1}/{self.Nsteps}: waiting for force...")
             line = self.sock_file.readline()
             if line == "":
@@ -507,6 +510,8 @@ class StructuralSolver:
                         f"SEND step {i_step + 1} last  LE/TE = {u_le_arr[-1, :].tolist()} / {u_te_arr[-1, :].tolist()}"
                     )
 
+                solid_step_time = perf_counter() - step_start
+                self.step_walltime[i_step] = solid_step_time
                 msg_geo = json.dumps(
                     {
                         "step": i_step + 1,
@@ -524,7 +529,7 @@ class StructuralSolver:
                         "rotation": zero_rot.tolist(),
                         "rotation_le": zero_rot.tolist(),
                         "rotation_te": zero_rot.tolist(),
-                        "solid_step_time": simulation_walltime,
+                        "solid_step_time": solid_step_time,
                     }
                 )
                 self.sock.sendall((msg_geo + "\n").encode())
@@ -544,7 +549,7 @@ class StructuralSolver:
             cfg_get(self.solid_config, "diag_csv_filename", default="solid_v18_diagnostics.csv"),
         )
         with open(diag_csv, "w") as fp:
-            fp.write("step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error\n")
+            fp.write("step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error,step_walltime\n")
             for k_idx in range(self.Nsteps):
                 fp.write(
                     f"{k_idx + 1},"
@@ -556,7 +561,8 @@ class StructuralSolver:
                     f"{self.energies[k_idx + 1, 3]:.12e},"
                     f"{self.work_Wf[k_idx]:.12e},"
                     f"{self.work_Ws[k_idx]:.12e},"
-                    f"{self.work_rel_errors[k_idx]:.12e}\n"
+                    f"{self.work_rel_errors[k_idx]:.12e},"
+                    f"{self.step_walltime[k_idx]:.12e}\n"
                 )
 
 
