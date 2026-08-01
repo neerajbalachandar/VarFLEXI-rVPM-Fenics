@@ -66,6 +66,36 @@ def relative_residual(current: Sequence[Sequence[float]], previous: Optional[Seq
     return (num ** 0.5) / max(den ** 0.5, 1.0e-16)
 
 
+def force_components(forces: Sequence[Sequence[float]]) -> Tuple[float, float]:
+    lift = 0.0
+    drag = 0.0
+    for row in forces:
+        if len(row) >= 3:
+            drag -= float(row[0])
+            lift += float(row[2])
+    return lift, drag
+
+
+def force_coefficients(
+    forces: Sequence[Sequence[float]],
+    q_inf: Optional[float],
+    ref_area: Optional[float],
+) -> Tuple[float, float]:
+    lift, drag = force_components(forces)
+    if q_inf is None or ref_area is None:
+        return float("nan"), float("nan")
+    denom = max(float(q_inf) * float(ref_area), 1.0e-16)
+    return lift / denom, drag / denom
+
+
+def optional_float(data: Dict[str, Any], key: str) -> float:
+    value = data.get(key, float("nan"))
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 @dataclass
 class CouplingRuntimeState:
     prev_geometry: Optional[List[List[float]]] = None
@@ -245,6 +275,12 @@ class VarFlExICoupler:
                     "sample_fx",
                     "sample_fy",
                     "sample_fz",
+                    "lift",
+                    "drag",
+                    "cl",
+                    "cd",
+                    "solid_step_time",
+                    "fluid_step_time",
                 ]
             )
 
@@ -260,6 +296,7 @@ class VarFlExICoupler:
 
                 geometry_residual = relative_residual(geometry, self.state.prev_geometry)
                 self.state.prev_geometry = [row[:] for row in geometry]
+                solid_step_time = optional_float(geo_data, "solid_step_time")
 
                 if self.debug_io and geometry:
                     geom_mag = [(g[0] ** 2 + g[1] ** 2 + g[2] ** 2) ** 0.5 for g in geometry]
@@ -279,6 +316,17 @@ class VarFlExICoupler:
                 relaxed_forces, relax_used, force_residual = self.relax_forces(forces)
                 force_data["force"] = relaxed_forces
 
+                q_inf = force_data.get("q_inf")
+                ref_area = force_data.get("ref_area")
+                cl, cd = force_coefficients(relaxed_forces, q_inf, ref_area)
+                lift, drag = force_components(relaxed_forces)
+                fluid_step_time = optional_float(force_data, "fluid_step_time")
+                force_data["lift"] = lift
+                force_data["drag"] = drag
+                force_data["cl"] = cl
+                force_data["cd"] = cd
+                force_data["fluid_step_time"] = fluid_step_time
+
                 if self.debug_io and relaxed_forces:
                     print(
                         f"Sample force[0] = {relaxed_forces[0]} "
@@ -296,6 +344,12 @@ class VarFlExICoupler:
                         "geometry_residual": geometry_residual,
                         "force_received": forces_received_raw,
                         "force_sent": relaxed_forces,
+                        "lift": lift,
+                        "drag": drag,
+                        "cl": cl,
+                        "cd": cd,
+                        "solid_step_time": solid_step_time,
+                        "fluid_step_time": fluid_step_time,
                     },
                     history_fp,
                 )
@@ -312,6 +366,12 @@ class VarFlExICoupler:
                         f"{float(sample[0]):.6e}",
                         f"{float(sample[1]):.6e}",
                         f"{float(sample[2]):.6e}",
+                        f"{float(lift):.6e}",
+                        f"{float(drag):.6e}",
+                        f"{float(cl):.6e}" if cl == cl else "nan",
+                        f"{float(cd):.6e}" if cd == cd else "nan",
+                        f"{solid_step_time:.6e}" if solid_step_time == solid_step_time else "nan",
+                        f"{fluid_step_time:.6e}" if fluid_step_time == fluid_step_time else "nan",
                     ]
                 )
 

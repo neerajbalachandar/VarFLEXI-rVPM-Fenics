@@ -25,12 +25,16 @@ uns.run_simulation(simulation, nsteps;
 )
 
 open(diag_path, "w") do io
-    println(io, "step,force_residual,geometry_residual")
+    println(io, "step,force_residual,geometry_residual,lift,drag,cl,cd")
     n = length(step_hist)
     for k in 1:n
         gres = k <= length(geom_res_hist) ? geom_res_hist[k] : NaN
         fres = k <= length(force_res_hist) ? force_res_hist[k] : NaN
-        println(io, "$(step_hist[k]),$(fres),$(gres)")
+        lift = k <= length(lift_hist) ? lift_hist[k] : NaN
+        drag = k <= length(drag_hist) ? drag_hist[k] : NaN
+        cl = k <= length(cl_hist) ? cl_hist[k] : NaN
+        cd = k <= length(cd_hist) ? cd_hist[k] : NaN
+        println(io, "$(step_hist[k]),$(fres),$(gres),$(lift),$(drag),$(cl),$(cd)")
     end
 end
 

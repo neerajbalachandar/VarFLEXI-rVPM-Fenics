@@ -1,5 +1,6 @@
 import os
 import sys
+from time import perf_counter
 
 print("cwd =", os.getcwd())
 print("sys.path =")
@@ -523,6 +524,7 @@ class StructuralSolver:
                         "rotation": zero_rot.tolist(),
                         "rotation_le": zero_rot.tolist(),
                         "rotation_te": zero_rot.tolist(),
+                        "solid_step_time": simulation_walltime,
                     }
                 )
                 self.sock.sendall((msg_geo + "\n").encode())

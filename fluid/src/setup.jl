@@ -191,6 +191,10 @@ end
 step_hist = Int[]
 force_res_hist = Float64[]
 geom_res_hist = Float64[]
+lift_hist = Float64[]
+drag_hist = Float64[]
+cl_hist = Float64[]
+cd_hist = Float64[]
 force_trace_path = joinpath(save_path, run_name * "_force_payload_history.jsonl")
 force_trace_io = open(force_trace_path, "w")
 diag_path = joinpath(save_path, run_name * "_coupling_diagnostics.csv")

@@ -1,4 +1,5 @@
 function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
+    step_start_ns = time_ns()
     step_ref[] += 1
     step = step_ref[]
 
@@ -66,6 +67,19 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     push!(step_hist, step)
     push!(force_res_hist, force_res)
 
+    lift = sum(force_mat[:, 3])
+    drag = -sum(force_mat[:, 1])
+    ref_area = max(span * root_chord, 1.0e-16)
+    q_inf = 0.5 * rho * magVinf^2
+    denom = max(q_inf * ref_area, 1.0e-16)
+    cl = lift / denom
+    cd = drag / denom
+    fluid_step_time = (time_ns() - step_start_ns) / 1.0e9
+    push!(lift_hist, lift)
+    push!(drag_hist, drag)
+    push!(cl_hist, cl)
+    push!(cd_hist, cd)
+
     println(
         force_trace_io,
         JSON.json(Dict(
@@ -75,6 +89,13 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             "indexing" => "span-major",
             "force" => force_out,
             "particles" => np,
+            "lift" => lift,
+            "drag" => drag,
+            "cl" => cl,
+            "cd" => cd,
+            "q_inf" => q_inf,
+            "ref_area" => ref_area,
+            "fluid_step_time" => fluid_step_time,
         )),
     )
     flush(force_trace_io)
@@ -89,6 +110,13 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         "eta_span" => eta_span_force_payload,
         "eta_chord" => eta_chord_force,
         "force" => force_out,
+        "lift" => lift,
+        "drag" => drag,
+        "cl" => cl,
+        "cd" => cd,
+        "q_inf" => q_inf,
+        "ref_area" => ref_area,
+        "fluid_step_time" => fluid_step_time,
     )) * "\n")
     flush(sock)
 
