@@ -50,7 +50,7 @@ SOLID_PID=$!
 # fluid solver
 # julia fluid/fluid.jl --fluid "$CONFIG_DIR/fluid_params.yaml" --solid "$CONFIG_DIR/solid_params.yaml" --coupling "$CONFIG_DIR/coupling_params.yaml"
 # Julia project (~/FLOWUnsteady)
-PROJECT_DIR="$(cd "$ROOT_DIR/../.." && pwd)"
+PROJECT_DIR="$(cd "$ROOT_DIR/.." && pwd)"
 
 # fluid solver
 julia --project="$PROJECT_DIR" \

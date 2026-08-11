@@ -1,34 +1,27 @@
-#check page 6 of the byu paper for this
-
-# dt plots (drag coefficient v/s t at dt=0.002,0.001,0.0005 seconds) 
-# dt plots (lift coefficient v/s t at dt=0.002,0.001,0.0005 seconds)
-#dt plots (drag coefficient v/s spanwise location at dt =0.002,0.001,0.0005 seconds)
-#dt plots (lift coefficient v/s spanwise location at dt =0.002,0.001,0.0005 seconds)
- 
-#the dependent quantities can be calculated from each of the run of dt.
-
 from pathlib import Path
 import sys
+
+# ran it for 1.6 sec which in the case of last dt iteration was 3200 timesteps
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from run_case import run_case
 
-timesteps = [0.001,0.002,0.0005]
+# Fixed total time from coupling.yaml
+TOTAL_TIME = 2.0
 
-for dt in timesteps:
+# Desired time-step sizes
+dt_values = [0.05, 0.01, 0.001]
+
+
+for dt in dt_values:
+    n_steps = int(TOTAL_TIME / dt)   # e.g., 100 for dt=0.05
     run_case(
         case_name=f"dt_{dt}",
-        fluid_updates={
-        },
-        solid_updates={
-
-        },
+        fluid_updates={},
+        solid_updates={},
         coupling_updates={
-            "total_time":1.0,
-            "n_steps":int(1.0/dt)
+            "total_time": TOTAL_TIME,
+            "n_steps": n_steps
         }
     )
-
-
-

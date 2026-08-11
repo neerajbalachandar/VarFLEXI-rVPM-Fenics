@@ -13,9 +13,10 @@ from pathlib import Path
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
+
 from run_case import run_case
 
-span_disc = [10,20,40,80]
+span_disc = [10,60,150]
 
 for span in span_disc:
     run_case(

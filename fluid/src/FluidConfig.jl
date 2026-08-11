@@ -94,7 +94,7 @@ function load_configs(fluid_path::AbstractString, solid_path::AbstractString, co
     dt = ttot / nsteps
 
     vinf = as_float(fluid, "vinf", 8.0)
-    p_per_step = as_int(fluid, "particles_per_step", 1)
+    p_per_step = as_int(fluid, "particles_per_step", 1.0)
     lambda_vpm = as_float(fluid, "lambda_vpm", 2.0)
     span = as_float(solid, "span", as_float(fluid, "span", 0.8))
 

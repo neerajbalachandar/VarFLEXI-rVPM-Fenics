@@ -117,7 +117,12 @@ class VarFlExICoupler:
         self.use_aitken = as_bool(cfg_get(self.coupling_params, "use_aitken", default=False))
         self.debug_io = as_bool(cfg_get(self.coupling_params, "debug_io", default=False))
 
-        self.results_dir = os.path.join(self.repo_root, "results", "coupling")
+        results_root = cfg_get(self.coupling_params, "results_root", default=os.path.join(self.repo_root, "results"))
+        if os.path.isabs(results_root):
+            base_results_root = results_root
+        else:
+            base_results_root = os.path.abspath(os.path.join(self.repo_root, "..", results_root))
+        self.results_dir = os.path.join(base_results_root, "coupling")
         os.makedirs(self.results_dir, exist_ok=True)
         self.log_csv_path = os.path.join(self.results_dir, "coupling_history.csv")
         self.history_jsonl_path = os.path.join(self.results_dir, "forces_sent_received_history.jsonl")

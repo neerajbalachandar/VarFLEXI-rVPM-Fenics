@@ -1,19 +1,40 @@
 #!/usr/bin/env python3
-"""Run one or more coupled cases by updating YAML config files and launching the project runner."""
+"""Run coupled VarFlExI/FLOWUnsteady parameter sweeps from one entry point."""
 
 from __future__ import annotations
 
 import argparse
 import copy
+import inspect
 import os
+import runpy
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG_DIR = REPO_ROOT / "config"
+DEFAULT_RESULTS_ROOT = REPO_ROOT / "results" / "parameter_sweeps"
+CONFIG_FILES = {
+    "fluid": "fluid_params.yaml",
+    "solid": "solid_params.yaml",
+    "coupling": "coupling_params.yaml",
+}
+
+
+@dataclass(frozen=True)
+class CaseSpec:
+    name: str
+    fluid_updates: dict[str, Any] | None = None
+    solid_updates: dict[str, Any] | None = None
+    coupling_updates: dict[str, Any] | None = None
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -40,7 +61,220 @@ def apply_update(data: dict[str, Any], key_path: str, value: Any) -> None:
 
 
 def sanitize_name(value: Any) -> str:
-    return str(value).replace(" ", "_").replace("/", "_").replace("\\", "_")
+    text = str(value).strip().replace(" ", "_")
+    for char in ("/", "\\", ":", "=", ","):
+        text = text.replace(char, "_")
+    return text
+
+
+def relative_to_repo(path: Path) -> str:
+    try:
+        return str(path.relative_to(REPO_ROOT)).replace(os.sep, "/")
+    except ValueError:
+        return str(path)
+
+
+def config_paths(config_dir: Path) -> dict[str, Path]:
+    return {key: config_dir / filename for key, filename in CONFIG_FILES.items()}
+
+
+def load_configs(config_dir: Path) -> dict[str, dict[str, Any]]:
+    return {key: load_yaml(path) for key, path in config_paths(config_dir).items()}
+
+
+def snapshot_config_text(config_dir: Path) -> dict[Path, bytes]:
+    return {path: path.read_bytes() for path in config_paths(config_dir).values() if path.exists()}
+
+
+def restore_config_text(snapshot: dict[Path, bytes]) -> None:
+    for path, payload in snapshot.items():
+        path.write_bytes(payload)
+
+
+def write_configs(config_dir: Path, configs: dict[str, dict[str, Any]]) -> None:
+    for key, filename in CONFIG_FILES.items():
+        dump_yaml(config_dir / filename, configs[key])
+
+
+def ensure_unique_dir(path: Path) -> Path:
+    if not path.exists() or not any(path.iterdir()):
+        return path
+
+    suffix = 2
+    while True:
+        candidate = path.with_name(f"{path.name}_{suffix:02d}")
+        if not candidate.exists():
+            return candidate
+        suffix += 1
+
+
+def copy_run_configs(config_dir: Path, run_config_dir: Path) -> None:
+    run_config_dir.mkdir(parents=True, exist_ok=True)
+    for filename in CONFIG_FILES.values():
+        shutil.copy2(config_dir / filename, run_config_dir / filename)
+
+
+def write_manifest(run_dir: Path, manifest: dict[str, Any]) -> None:
+    with (run_dir / "run_manifest.yaml").open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(manifest, handle, sort_keys=False)
+
+
+def normalize_case_updates(
+    fluid_updates: dict[str, Any] | None,
+    solid_updates: dict[str, Any] | None,
+    coupling_updates: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    return {
+        "fluid": dict(fluid_updates or {}),
+        "solid": dict(solid_updates or {}),
+        "coupling": dict(coupling_updates or {}),
+    }
+
+
+def apply_case_updates(configs: dict[str, dict[str, Any]], updates: dict[str, dict[str, Any]]) -> None:
+    for config_key, config_updates in updates.items():
+        if config_key not in configs:
+            raise KeyError(f"Unknown config group: {config_key}")
+        for key_path, value in config_updates.items():
+            apply_update(configs[config_key], key_path, value)
+
+
+def infer_study_name() -> str:
+    run_case_path = Path(__file__).resolve()
+    for frame in inspect.stack()[1:]:
+        caller = Path(frame.filename).resolve()
+        if caller != run_case_path:
+            return caller.stem
+    return "manual"
+
+
+def run_and_tee(command: list[str], cwd: Path, log_path: Path) -> None:
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="")
+            log_handle.write(line)
+        returncode = process.wait()
+
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command)
+
+
+def run_case(
+    case_name: str,
+    fluid_updates: dict[str, Any] | None = None,
+    solid_updates: dict[str, Any] | None = None,
+    coupling_updates: dict[str, Any] | None = None,
+    *,
+    study_name: str | None = None,
+    config_dir: Path | str = DEFAULT_CONFIG_DIR,
+    results_root: Path | str = DEFAULT_RESULTS_ROOT,
+    dry_run: bool = False,
+) -> Path:
+    """Run one simulation case and save configs, manifest, log, and solver output together."""
+
+    config_dir = Path(config_dir).expanduser().resolve()
+    results_root = Path(results_root).expanduser().resolve()
+    study_name = study_name or infer_study_name()
+    study_dir = results_root / sanitize_name(study_name)
+    run_dir = study_dir / sanitize_name(case_name)
+    run_results_dir = run_dir / "results"
+    run_config_dir = run_dir / "config"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run_results_dir.mkdir(parents=True, exist_ok=True)
+
+    baseline_text = snapshot_config_text(config_dir)
+    baseline_configs = load_configs(config_dir)
+    configs_to_run = copy.deepcopy(baseline_configs)
+    updates = normalize_case_updates(fluid_updates, solid_updates, coupling_updates)
+    apply_case_updates(configs_to_run, updates)
+
+    output_root = relative_to_repo(run_results_dir)
+    configs_to_run["fluid"]["save_directory"] = f"{output_root}/fluid"
+    configs_to_run["solid"]["results_root"] = output_root
+    configs_to_run["coupling"]["results_root"] = output_root
+
+    manifest = {
+        "study_name": study_name,
+        "case_name": case_name,
+        "run_dir": str(run_dir),
+        "updates": updates,
+        "status": "dry_run" if dry_run else "prepared",
+    }
+
+    try:
+        write_configs(config_dir, configs_to_run)
+        copy_run_configs(config_dir, run_config_dir)
+        write_manifest(run_dir, manifest)
+
+        print(f"[{study_name}] prepared {case_name}: {relative_to_repo(run_dir)}")
+        if dry_run:
+            return run_dir
+
+        run_and_tee(["bash", "run.sh"], REPO_ROOT, run_dir / "run.log")
+
+        manifest["status"] = "completed"
+        write_manifest(run_dir, manifest)
+        print(f"[{study_name}] completed {case_name}")
+        return run_dir
+    except subprocess.CalledProcessError as exc:
+        manifest["status"] = "failed"
+        manifest["returncode"] = exc.returncode
+        write_manifest(run_dir, manifest)
+        print(f"[{study_name}] failed {case_name}; see {relative_to_repo(run_dir / 'run.log')}", file=sys.stderr)
+        raise
+    finally:
+        restore_config_text(baseline_text)
+
+
+def built_in_studies() -> dict[str, list[CaseSpec]]:
+    total_time = 1.0
+    dt_values = [0.01, 0.001, 0.0005]
+
+    return {
+        "dt": [
+            CaseSpec(
+                name=f"dt_{sanitize_name(dt)}",
+                coupling_updates={"total_time": total_time, "n_steps": int(total_time / dt)},
+            )
+            for dt in dt_values
+        ],
+        "tip_displacement": [
+            CaseSpec(
+                name=f"dt_{sanitize_name(dt)}",
+                coupling_updates={"total_time": total_time, "n_steps": int(total_time / dt)},
+            )
+            for dt in dt_values
+        ],
+        "dx_dy_solid": [
+            CaseSpec(name=f"n_x_{nx}_n_y_{ny}", solid_updates={"nx": nx, "ny": ny})
+            for nx, ny in product([10, 20, 40, 80], [40, 120, 240])
+        ],
+        "pperstep": [
+            CaseSpec(name=f"particles_step_{p_step}", fluid_updates={"particles_per_step": p_step})
+            for p_step in [1, 2, 3, 4]
+        ],
+        "crm_rbf": [
+            CaseSpec(name=f"force_transfer_{mode}", coupling_updates={"force_transfer_mode": mode})
+            for mode in ["rbf", "crm"]
+        ],
+        "dx_dy_fluid": [
+            CaseSpec(name=f"n_span_{span}", fluid_updates={"n_span": span})
+            for span in [20, 40, 80, 160]
+        ],
+        "dx_dy": [
+            CaseSpec(name=f"n_span_{span}", fluid_updates={"n_span": span})
+            for span in [10, 20, 40, 80]
+        ],
+    }
 
 
 def discover_sweep_file(repo_root: Path, explicit: str | None) -> Path | None:
@@ -53,186 +287,152 @@ def discover_sweep_file(repo_root: Path, explicit: str | None) -> Path | None:
         repo_root / "scripts" / "param_sweep.yaml",
         repo_root / "scripts" / "run_params.yaml",
     ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
+    return next((candidate for candidate in candidates if candidate.exists()), None)
 
 
-def parse_sweep_spec(raw_spec: Any) -> list[dict[str, dict[str, Any]]]:
+def parse_sweep_spec(raw_spec: Any) -> list[CaseSpec]:
     if raw_spec is None:
-        return [{}]
+        return []
 
-    if isinstance(raw_spec, list):
-        combos: list[dict[str, dict[str, Any]]] = []
-        for entry in raw_spec:
-            if isinstance(entry, dict) and "file" in entry and "key" in entry and "values" in entry:
-                target_file = entry.get("file")
-                key_path = entry.get("key")
-                values = entry.get("values") or []
-                if target_file is None or key_path is None:
-                    continue
-                if not isinstance(values, list):
-                    values = [values]
-                for value in values:
-                    combos.append({str(target_file): {str(key_path): value}})
-            else:
-                raise ValueError("Each sweep entry must contain file, key, and values")
-        return combos
+    if isinstance(raw_spec, dict) and "cases" in raw_spec:
+        raw_cases = raw_spec["cases"]
+        if not isinstance(raw_cases, list):
+            raise ValueError("'cases' must be a list")
+        return [
+            CaseSpec(
+                name=str(case["name"]),
+                fluid_updates=case.get("fluid_updates") or case.get("fluid") or {},
+                solid_updates=case.get("solid_updates") or case.get("solid") or {},
+                coupling_updates=case.get("coupling_updates") or case.get("coupling") or {},
+            )
+            for case in raw_cases
+        ]
 
-    if isinstance(raw_spec, dict):
-        if "sweep" in raw_spec:
-            return parse_sweep_spec(raw_spec["sweep"])
+    if isinstance(raw_spec, dict) and "params" in raw_spec:
+        params = raw_spec["params"]
+        if not isinstance(params, dict):
+            raise ValueError("'params' must map config groups to update dictionaries")
 
-        if "params" in raw_spec:
-            params = raw_spec["params"]
-            if isinstance(params, dict):
-                grouped: list[dict[str, dict[str, Any]]] = [{}]
-                for target_file, updates in params.items():
-                    if not isinstance(updates, dict):
-                        raise ValueError("Sweep params must map files to dictionaries of updates")
-                    current_grouped: list[dict[str, dict[str, Any]]] = []
-                    for existing in grouped:
-                        key_names = []
-                        values_per_key: list[tuple[str, list[Any]]] = []
-                        for key_path, candidate_values in updates.items():
-                            if isinstance(candidate_values, list):
-                                values = candidate_values
-                            else:
-                                values = [candidate_values]
-                            key_names.append(str(key_path))
-                            values_per_key.append((str(key_path), values))
-                        if not values_per_key:
-                            current_grouped.append(existing)
-                            continue
-                        for combination in product(*[values for _, values in values_per_key]):
-                            updated = copy.deepcopy(existing)
-                            file_updates = updated.setdefault(str(target_file), {})
-                            for (key_path, _), value in zip(values_per_key, combination):
-                                file_updates[key_path] = value
-                            current_grouped.append(updated)
-                    grouped = current_grouped
-                return grouped
+        groups: list[dict[str, dict[str, Any]]] = [{"fluid": {}, "solid": {}, "coupling": {}}]
+        for group_name, updates in params.items():
+            if group_name not in groups[0]:
+                raise ValueError(f"Unknown parameter group '{group_name}'. Use fluid, solid, or coupling.")
+            if not isinstance(updates, dict):
+                raise ValueError(f"Parameter group '{group_name}' must be a dictionary")
 
-        if isinstance(raw_spec.get("file"), str) and isinstance(raw_spec.get("key"), str):
-            values = raw_spec.get("values") or []
-            if not isinstance(values, list):
-                values = [values]
-            return [{raw_spec["file"]: {raw_spec["key"]: value}} for value in values]
+            keys = list(updates.keys())
+            values = [value if isinstance(value, list) else [value] for value in updates.values()]
+            next_groups: list[dict[str, dict[str, Any]]] = []
+            for existing in groups:
+                for combination in product(*values):
+                    candidate = copy.deepcopy(existing)
+                    for key, value in zip(keys, combination):
+                        candidate[group_name][str(key)] = value
+                    next_groups.append(candidate)
+            groups = next_groups
 
-        # Fallback: treat the dict as a single set of updates for a single file.
-        return [raw_spec]
+        cases = []
+        for index, updates in enumerate(groups, start=1):
+            label_parts = []
+            for group_name, group_updates in updates.items():
+                for key, value in group_updates.items():
+                    label_parts.append(f"{group_name}_{key}_{sanitize_name(value)}")
+            name = f"case_{index:03d}_{'_'.join(label_parts)}" if label_parts else f"case_{index:03d}"
+            cases.append(
+                CaseSpec(
+                    name=name,
+                    fluid_updates=updates["fluid"],
+                    solid_updates=updates["solid"],
+                    coupling_updates=updates["coupling"],
+                )
+            )
+        return cases
 
-    raise ValueError("Unsupported sweep spec format")
+    raise ValueError("Sweep YAML must contain either 'cases' or 'params'")
 
 
-def build_run_label(updates: dict[str, dict[str, Any]], index: int) -> str:
-    if not updates:
-        return f"run_{index:03d}"
-
-    labels: list[str] = []
-    for file_name, file_updates in sorted(updates.items()):
-        for key_path, value in sorted(file_updates.items()):
-            labels.append(f"{file_name}_{key_path}_{sanitize_name(value)}")
-    return f"run_{index:03d}_{'_'.join(labels)}"
-
-
-def write_config_files(config_dir: Path, configs: dict[str, dict[str, Any]]) -> None:
-    for filename, payload in configs.items():
-        dump_yaml(config_dir / filename, payload)
+def selected_studies(selection: str) -> dict[str, list[CaseSpec]]:
+    studies = built_in_studies()
+    if selection == "all":
+        return studies
+    if selection not in studies:
+        valid = ", ".join(["all", *studies.keys()])
+        raise ValueError(f"Unknown study '{selection}'. Valid choices: {valid}")
+    return {selection: studies[selection]}
 
 
-def move_results_into_run_dir(repo_root: Path, run_dir: Path) -> None:
-    run_results_dir = run_dir / "results"
-    run_results_dir.mkdir(parents=True, exist_ok=True)
+def solver_studies() -> dict[str, Path]:
+    solver_dir = REPO_ROOT / "scripts" / "solver"
+    return {
+        path.stem: path
+        for path in sorted(solver_dir.glob("*.py"))
+        if not path.name.startswith("_")
+    }
 
-    source_results_dir = repo_root / "results"
-    if not source_results_dir.exists():
-        return
 
-    for child in source_results_dir.iterdir():
-        destination = run_results_dir / child.name
-        if destination.exists():
-            shutil.rmtree(destination)
-        shutil.move(str(child), str(destination))
+def run_solver_file(path: Path) -> None:
+    runpy.run_path(str(path), run_name="__main__")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the coupled solver workflow and optionally sweep YAML parameters")
-    parser.add_argument("--config-dir", default=None, help="Directory containing the YAML config files")
-    parser.add_argument("--sweep-file", default=None, help="YAML file describing sweep parameters under scripts/")
-    parser.add_argument("--results-root", default=None, help="Root folder for storing per-run results")
-    parser.add_argument("--dry-run", action="store_true", help="Show the planned runs without launching the solver")
+    studies = solver_studies()
+    parser = argparse.ArgumentParser(description="Run coupled solver parameter sweeps")
+    parser.add_argument(
+        "--study",
+        default=None,
+        choices=["all", *studies.keys()],
+        help="Solver sweep file to run from scripts/solver/. Use all to run every solver file.",
+    )
+    parser.add_argument("--config-dir", default=str(DEFAULT_CONFIG_DIR), help="Directory containing YAML config files")
+    parser.add_argument("--results-root", default=str(DEFAULT_RESULTS_ROOT), help="Root folder for sweep results")
+    parser.add_argument("--sweep-file", default=None, help="Optional YAML file with custom cases or params")
+    parser.add_argument("--dry-run", action="store_true", help="Prepare folders/configs without launching run.sh")
+    parser.add_argument("--list-studies", action="store_true", help="Print available built-in studies and exit")
     args = parser.parse_args()
 
-    repo_root = Path(__file__).resolve().parents[1]
-    config_dir = Path(args.config_dir).expanduser().resolve() if args.config_dir else repo_root / "config"
-    results_root = Path(args.results_root).expanduser().resolve() if args.results_root else repo_root / "results" / "runs"
-    sweep_file = discover_sweep_file(repo_root, args.sweep_file)
+    if args.list_studies:
+        for name, path in studies.items():
+            print(f"{name}: {relative_to_repo(path)}")
+        return
 
-    config_files = {
-        "fluid_params.yaml": config_dir / "fluid_params.yaml",
-        "solid_params.yaml": config_dir / "solid_params.yaml",
-        "coupling_params.yaml": config_dir / "coupling_params.yaml",
-    }
+    config_dir = Path(args.config_dir)
+    results_root = Path(args.results_root)
+    sweep_file = discover_sweep_file(REPO_ROOT, args.sweep_file) if args.sweep_file else None
 
-    baseline_configs = {name: load_yaml(path) for name, path in config_files.items()}
-    sweep_specs = parse_sweep_spec(load_yaml(sweep_file) if sweep_file else None)
-    if not sweep_specs:
-        sweep_specs = [{}]
+    if sweep_file:
+        cases = parse_sweep_spec(load_yaml(sweep_file))
+        if not cases:
+            raise ValueError(f"No cases found in sweep file: {sweep_file}")
+        for case in cases:
+            run_case(
+                case.name,
+                case.fluid_updates,
+                case.solid_updates,
+                case.coupling_updates,
+                study_name=sweep_file.stem,
+                config_dir=config_dir,
+                results_root=results_root,
+                dry_run=args.dry_run,
+            )
+        return
 
-    results_root.mkdir(parents=True, exist_ok=True)
+    if args.study is None:
+        parser.print_help()
+        print("\nChoose a solver file with --study, or run the file directly, for example:")
+        print("  python3 scripts/solver/dx_dy_solid.py")
+        return
 
-    for index, update_spec in enumerate(sweep_specs, start=1):
-        run_label = build_run_label(update_spec, index)
-        run_dir = results_root / run_label
-        run_dir.mkdir(parents=True, exist_ok=True)
-        run_config_dir = run_dir / "config"
-        run_config_dir.mkdir(parents=True, exist_ok=True)
-        run_results_dir = run_dir / "results"
-        run_results_dir.mkdir(parents=True, exist_ok=True)
+    if args.dry_run:
+        print("--dry-run is only supported for run_case(...) calls and --sweep-file cases.")
+        print("Run the solver file directly after setting dry_run=True in its run_case(...) call if needed.")
+        return
 
-        configs_to_run = copy.deepcopy(baseline_configs)
-        for file_name, file_updates in update_spec.items():
-            target_path = config_files.get(file_name)
-            if target_path is None:
-                raise FileNotFoundError(f"Unknown config file in sweep spec: {file_name}")
-            target_payload = configs_to_run[file_name]
-            for key_path, value in file_updates.items():
-                apply_update(target_payload, key_path, value)
+    if args.study == "all":
+        for path in studies.values():
+            run_solver_file(path)
+        return
 
-        # Make each run write its own output folder.
-        run_output_root = str(run_dir.relative_to(repo_root)).replace(os.sep, "/")
-        fluid_payload = configs_to_run["fluid_params.yaml"]
-        solid_payload = configs_to_run["solid_params.yaml"]
-        fluid_payload["save_directory"] = f"{run_output_root}/results/fluid"
-        solid_payload["results_root"] = f"{run_output_root}/results"
-
-        write_config_files(config_dir, configs_to_run)
-
-        # Copy the YAML files into the run results folder.
-        for file_name in config_files:
-            shutil.copy2(config_dir / file_name, run_config_dir / file_name)
-
-        manifest = {
-            "run_label": run_label,
-            "sweep_file": str(sweep_file) if sweep_file else None,
-            "updates": update_spec,
-        }
-        with (run_dir / "run_manifest.yaml").open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(manifest, handle, sort_keys=False)
-
-        print(f"Prepared run {run_label} in {run_dir}")
-        if args.dry_run:
-            print("Dry run enabled; skipping launch of run.sh")
-            continue
-
-        try:
-            subprocess.run(["bash", "run.sh"], cwd=repo_root, check=True)
-        finally:
-            move_results_into_run_dir(repo_root, run_dir)
-            # Restore the repository config after each run so the next iteration starts cleanly.
-            write_config_files(config_dir, baseline_configs)
+    run_solver_file(studies[args.study])
 
 
 if __name__ == "__main__":
