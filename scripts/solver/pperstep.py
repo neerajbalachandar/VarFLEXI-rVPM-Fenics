@@ -14,7 +14,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from run_case import run_case
 
 # Fluid fidelity parameter sweep
-particles_per_step = [1, 2, 3]
+particles_per_step = [2]
 
 for p_step in particles_per_step:
     run_case(

@@ -48,6 +48,8 @@ struct SolverConfig
     use_ftot_force::Bool
     debug_io::Bool
     regularize_vlm::Bool
+    max_particles::Int
+    max_particles_safety_factor::Float64
 
 end
 

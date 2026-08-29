@@ -15,7 +15,11 @@ mutable struct FluidHistory
     Fz::Vector{Float64}
 
     force_residual::Vector{Float64}
+    force_reference_norm::Vector{Float64}
+    force_relative_error::Vector{Float64}
     geometry_residual::Vector{Float64}
+    geometry_reference_norm::Vector{Float64}
+    geometry_relative_error::Vector{Float64}
 
     particles::Vector{Int}
 
@@ -28,6 +32,14 @@ function FluidHistory()
     FluidHistory(
 
         Int[],
+
+        Float64[],
+
+        Float64[],
+
+        Float64[],
+
+        Float64[],
 
         Float64[],
 

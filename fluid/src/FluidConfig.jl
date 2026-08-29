@@ -62,14 +62,7 @@ function cfg_get(cfg::Dict{String, Any}, key::String, default; duplicate::Symbol
 end
 
 as_float(cfg, key, default; duplicate::Symbol=:last) = Float64(cfg_get(cfg, key, default; duplicate=duplicate))
-# as_int(cfg, key, default; duplicate::Symbol=:last) = Int(cfg_get(cfg, key, default; duplicate=duplicate))
-function as_int(cfg, key, default; duplicate::Symbol=:last)
-    val = cfg_get(cfg, key, default; duplicate=duplicate)
-    println("KEY = $key")
-    println("TYPE = ", typeof(val))
-    println("VALUE = ", repr(val))
-    return Int(val)
-end
+as_int(cfg, key, default; duplicate::Symbol=:last) = Int(cfg_get(cfg, key, default; duplicate=duplicate))
 as_bool(cfg, key, default; duplicate::Symbol=:last) = Bool(cfg_get(cfg, key, default; duplicate=duplicate))
 as_string(cfg, key, default; duplicate::Symbol=:last) = String(cfg_get(cfg, key, default; duplicate=duplicate))
 
@@ -135,6 +128,8 @@ function load_configs(fluid_path::AbstractString, solid_path::AbstractString, co
         as_bool(fluid, "use_ftot_force", true),
         lowercase(get(ENV, "COUPLING_DEBUG_IO", "0")) ∉ ("0", "false", "no"),
         as_bool(fluid, "regularize_vlm", true),
+        as_int(fluid, "max_particles", 400000),
+        as_float(fluid, "max_particles_safety_factor", 3.0),
     )
 
     wake_cfg = WakeConfig(

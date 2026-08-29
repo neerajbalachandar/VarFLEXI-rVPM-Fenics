@@ -16,13 +16,14 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from run_case import run_case
 
-span_disc = [10,60,150]
+span_disc = [20,110,200]
 
 for span in span_disc:
     run_case(
         case_name=f"n_span_{span}",
         fluid_updates={
-            "n_span": span
+            "n_span": span,
+            "n_span_comm": span,
         },
         solid_updates={
 
@@ -30,6 +31,5 @@ for span in span_disc:
         coupling_updates={
         }
     )
-
 
 

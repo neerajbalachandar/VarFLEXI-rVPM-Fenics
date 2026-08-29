@@ -86,7 +86,11 @@ nsteps_save = solver_cfg.nsteps_save
 save_horseshoes = solver_cfg.save_horseshoes
 mkpath(save_path)
 
-max_particles = Int((nsteps + 1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step + 1) + p_per_step))
+estimated_particles = Int(ceil((nsteps + 1) * (vlm.get_m(vehicle.vlm_system) * (p_per_step + 1) + p_per_step)))
+max_particles = max(
+    solver_cfg.max_particles,
+    Int(ceil(solver_cfg.max_particles_safety_factor * estimated_particles))
+)
 omit_shedding_rows = Int[]
 
 rmv_strength = 2 * 2 / max(p_per_step, 1) * dt / (1 / 12)
@@ -132,7 +136,8 @@ println(
     "Shedding config: spanwise-only wing, n_span=$(n_span), " *
     "wake_sphere_factor=$(wake_sphere_factor), wake_remove_every=$(wake_remove_every), " *
     "wake_strength_factors=($(wake_strength_min_factor),$(wake_strength_max_factor)), " *
-    "wake_sigma_factors=($(wake_sigma_min_factor),$(wake_sigma_max_factor))"
+    "wake_sigma_factors=($(wake_sigma_min_factor),$(wake_sigma_max_factor)), " *
+    "estimated_particles=$(estimated_particles), max_particles=$(max_particles)"
 )
 
 sock = connect_to_server(coupling_cfg.host, coupling_cfg.port)
@@ -190,7 +195,11 @@ end
 
 step_hist = Int[]
 force_res_hist = Float64[]
+force_ref_norm_hist = Float64[]
+force_rel_error_hist = Float64[]
 geom_res_hist = Float64[]
+geom_ref_norm_hist = Float64[]
+geom_rel_error_hist = Float64[]
 lift_hist = Float64[]
 drag_hist = Float64[]
 cl_hist = Float64[]

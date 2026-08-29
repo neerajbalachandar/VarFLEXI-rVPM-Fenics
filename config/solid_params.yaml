@@ -5,7 +5,7 @@ thickness_ratio: 0.12
 leading_edge_sweep: 0.0
 nx: 50
 ny: 150
-results_root: results/parameter_sweeps/pperstep/particles_step_2/results
+results_root: results/graphical_abstract2
 output_dir: solid/v18_reissner_mindlin_plate
 output_run_name: v18_reissner_mindlin_plate
 xdmf_filename: elastodynamics-results.xdmf
@@ -13,11 +13,11 @@ mesh_pvd_filename: solid_mesh.pvd
 q_pvd_filename: plate_state.pvd
 sig_pvd_filename: membrane_stress.pvd
 diag_csv_filename: solid_v18_diagnostics.csv
-E: 3.0e10
-nu: 0.35
-rho_s: 1600.0
-eta_m: 0.8
-eta_k: 0.0001
+E: 5.0e9
+nu: 0.45
+rho_s: 1200.0
+eta_m: 0.01
+eta_k: 0.00001
 kappa_shear: 0.833
 alpha_m: 0.1
 alpha_f: 0.2

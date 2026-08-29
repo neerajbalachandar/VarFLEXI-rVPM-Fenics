@@ -1,5 +1,5 @@
-total_time: 5.0
-n_steps: 1000
+total_time: 1.5
+n_steps: 300
 host: 127.0.0.1
 port: 9000
 comm_nspan: 80
@@ -8,7 +8,7 @@ work_conservative_mode: true
 work_conservation_mode: true
 span_sampling_mode: node-stride
 custom_span_stride: null
-force_transfer_mode: crm
+force_transfer_mode: rbf
 rbf_radius: 0.08
 rbf_neighbors: 24
 max_abs_force_component: 5.0e3
@@ -16,9 +16,10 @@ enforce_chord_projection: false
 enforce_span_projection: false
 force_relax: 1.0
 geom_relax: 1.0
+epsilon_reg: 1.0e-16
 debug_io: null
 payload_indexing: null
 send_cp: true
 send_le: true
 send_te: true
-results_root: results/parameter_sweeps/pperstep/particles_step_2/results
+results_root: results/graphical_abstract2

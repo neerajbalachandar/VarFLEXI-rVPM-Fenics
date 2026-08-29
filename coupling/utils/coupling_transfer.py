@@ -283,6 +283,33 @@ class CouplingTransfer:
             raise RuntimeError("RBF backend is not initialized")
         return self.rbf_backend.apply(forces)
 
+    def force_transfer_to_aero_space(self, nodal_forces, Fs_coeff=None):
+        if self.force_transfer_mode == "crm":
+            return self.nodal_displacements_to_panel_average(
+                nodal_forces, self.crm_transfer_matrix, self.crm_panel_areas
+            )
+
+        if Fs_coeff is None:
+            raise RuntimeError("RBF force-transfer diagnostic requires Fs_coeff")
+        Fs_coeff = np.asarray(Fs_coeff, dtype=float).reshape(-1, 3)
+        structural_at_aero = np.sum(
+            self.nbr_w[:, :, None] * Fs_coeff[self.nbr_ids, :], axis=1
+        )
+        return structural_at_aero * self.A_diag[:, None]
+
+    def force_transfer_metrics(self, aero_forces, nodal_forces, Fs_coeff=None, epsilon_reg=1.0e-16):
+        aero_forces = np.asarray(aero_forces, dtype=float).reshape(-1, 3)
+        structural_common = self.force_transfer_to_aero_space(nodal_forces, Fs_coeff=Fs_coeff)
+        if structural_common.shape != aero_forces.shape:
+            raise RuntimeError(
+                "Force-transfer diagnostic shape mismatch: "
+                f"structural_common={structural_common.shape}, aero_forces={aero_forces.shape}"
+            )
+        residual = float(np.linalg.norm((structural_common - aero_forces).reshape(-1)))
+        reference_norm = float(np.linalg.norm(aero_forces.reshape(-1)))
+        relative_error = residual / max(reference_norm + float(epsilon_reg), 1.0e-300)
+        return residual, relative_error, structural_common
+
     def span_edges_from_stations(self, eta_span_vals):
         return self.crm_backend.span_edges_from_stations(eta_span_vals)
 

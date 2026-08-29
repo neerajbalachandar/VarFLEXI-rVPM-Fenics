@@ -138,6 +138,14 @@ def apply_case_updates(configs: dict[str, dict[str, Any]], updates: dict[str, di
         for key_path, value in config_updates.items():
             apply_update(configs[config_key], key_path, value)
 
+    fluid_updates = updates.get("fluid", {})
+    if "n_span" in fluid_updates:
+        span = fluid_updates["n_span"]
+        if "n_span_comm" not in fluid_updates:
+            configs["fluid"]["n_span_comm"] = span
+        if "comm_nspan" not in updates.get("coupling", {}):
+            configs["coupling"]["comm_nspan"] = span
+
 
 def infer_study_name() -> str:
     run_case_path = Path(__file__).resolve()

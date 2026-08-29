@@ -51,19 +51,57 @@ def vector_rows(raw: Any, key: str) -> List[List[float]]:
     return rows
 
 
-def relative_residual(current: Sequence[Sequence[float]], previous: Optional[Sequence[Sequence[float]]]) -> float:
-    if previous is None or len(current) == 0 or len(current) != len(previous):
-        return 0.0
+def vector_norm(rows: Sequence[Sequence[float]]) -> float:
+    total = 0.0
+    for row in rows:
+        for value in row[:3]:
+            total += float(value) ** 2
+    return total ** 0.5
 
-    num = 0.0
-    den = 0.0
+
+def residual_metrics(
+    current: Sequence[Sequence[float]],
+    previous: Optional[Sequence[Sequence[float]]],
+    epsilon_reg: float,
+) -> Tuple[float, float, float]:
+    reference_norm = vector_norm(current)
+    if previous is None or len(current) == 0 or len(current) != len(previous):
+        return 0.0, reference_norm, 0.0
+
+    residual_sq = 0.0
     for a, b in zip(current, previous):
         dx = float(a[0]) - float(b[0])
         dy = float(a[1]) - float(b[1])
         dz = float(a[2]) - float(b[2])
-        num += dx * dx + dy * dy + dz * dz
-        den += float(a[0]) ** 2 + float(a[1]) ** 2 + float(a[2]) ** 2
-    return (num ** 0.5) / max(den ** 0.5, 1.0e-16)
+        residual_sq += dx * dx + dy * dy + dz * dz
+
+    residual = residual_sq ** 0.5
+    relative_error = residual / max(reference_norm + epsilon_reg, 1.0e-300)
+    return residual, reference_norm, relative_error
+
+
+def transfer_metrics(
+    structural_common: Sequence[Sequence[float]],
+    fluid_common: Sequence[Sequence[float]],
+    epsilon_reg: float,
+) -> Tuple[float, float]:
+    if len(structural_common) == 0 or len(structural_common) != len(fluid_common):
+        return float("nan"), float("nan")
+
+    residual_sq = 0.0
+    reference_sq = 0.0
+    for structural_row, fluid_row in zip(structural_common, fluid_common):
+        for structural_value, fluid_value in zip(structural_row[:3], fluid_row[:3]):
+            structural_value = float(structural_value)
+            fluid_value = float(fluid_value)
+            diff = structural_value - fluid_value
+            residual_sq += diff * diff
+            reference_sq += fluid_value * fluid_value
+
+    residual = residual_sq ** 0.5
+    reference_norm = reference_sq ** 0.5
+    relative_error = residual / max(reference_norm + epsilon_reg, 1.0e-300)
+    return residual, relative_error
 
 
 def force_components(forces: Sequence[Sequence[float]]) -> Tuple[float, float]:
@@ -111,9 +149,12 @@ class VarFlExICoupler:
 
         self.host=str(cfg_get(self.coupling_params, "host", default="127.0.0.1"))
         self.port=int(cfg_get(self.coupling_params, "port", default=9000))
+        self.total_time = float(cfg_get(self.coupling_params, "total_time", default=0.0))
         self.nsteps=int(cfg_get(self.coupling_params,"n_steps",default=cfg_get(self.coupling_params, "nsteps", default=1000)))
+        self.dt = self.total_time / self.nsteps if self.total_time > 0.0 and self.nsteps > 0 else float("nan")
         self.force_relax = float(cfg_get(self.coupling_params, "force_relax", default=1.0))
         self.geom_relax = float(cfg_get(self.coupling_params, "geom_relax", default=1.0))
+        self.epsilon_reg = float(cfg_get(self.coupling_params, "epsilon_reg", default=1.0e-16))
         self.use_aitken = as_bool(cfg_get(self.coupling_params, "use_aitken", default=False))
         self.debug_io = as_bool(cfg_get(self.coupling_params, "debug_io", default=False))
 
@@ -232,12 +273,14 @@ class VarFlExICoupler:
                     f"received {len(forces)}, expected {expected} ({n_span}x{n_chord})"
                 )
 
-    def relax_forces(self, forces: List[List[float]]) -> Tuple[List[List[float]], float]:
-        force_residual = relative_residual(forces, self.state.prev_forces)
+    def relax_forces(self, forces: List[List[float]]) -> Tuple[List[List[float]], float, float, float, float]:
+        force_residual, force_reference_norm, force_relative_error = residual_metrics(
+            forces, self.state.prev_forces, self.epsilon_reg
+        )
         relax_used = self.force_relax
 
         if self.use_aitken and self.state.prev_forces is not None:
-            if force_residual > 1.0e-2:
+            if force_relative_error > 1.0e-2:
                 self.state.aitken_relax = max(0.25, 0.9 * self.state.aitken_relax)
             else:
                 self.state.aitken_relax = min(1.0, 1.05 * self.state.aitken_relax)
@@ -257,7 +300,7 @@ class VarFlExICoupler:
                 )
 
         self.state.prev_forces = [row[:] for row in relaxed]
-        return relaxed, relax_used, force_residual
+        return relaxed, relax_used, force_residual, force_reference_norm, force_relative_error
 
     def send_json(self, conn, payload: Dict[str, Any]):
         conn.sendall((json.dumps(payload) + "\n").encode("utf-8"))
@@ -273,10 +316,19 @@ class VarFlExICoupler:
             writer.writerow(
                 [
                     "step",
+                    "time",
                     "n_forces",
                     "force_relax_used",
                     "force_residual",
+                    "force_reference_norm",
+                    "force_relative_error",
+                    "force_transfer_residual",
+                    "force_transfer_relative_error",
                     "geometry_residual",
+                    "geometry_reference_norm",
+                    "geometry_relative_error",
+                    "geometry_transfer_residual",
+                    "geometry_transfer_relative_error",
                     "sample_fx",
                     "sample_fy",
                     "sample_fz",
@@ -299,7 +351,12 @@ class VarFlExICoupler:
                 self.validate_geometry_payload(geo_data, geometry, step)
                 print("Geometry received.")
 
-                geometry_residual = relative_residual(geometry, self.state.prev_geometry)
+                time_value = step * self.dt if self.dt == self.dt else float("nan")
+                (
+                    geometry_residual,
+                    geometry_reference_norm,
+                    geometry_relative_error,
+                ) = residual_metrics(geometry, self.state.prev_geometry, self.epsilon_reg)
                 self.state.prev_geometry = [row[:] for row in geometry]
                 solid_step_time = optional_float(geo_data, "solid_step_time")
 
@@ -308,8 +365,14 @@ class VarFlExICoupler:
                     print(f"Geometry max={max(geom_mag):.6e}, mean={sum(geom_mag)/len(geom_mag):.6e}")
 
                 print("Sending geometry to fluid...")
+                geo_data["geometry_residual"] = geometry_residual
+                geo_data["geometry_reference_norm"] = geometry_reference_norm
+                geo_data["geometry_relative_error"] = geometry_relative_error
                 self.send_json(fluid_conn, geo_data)
-                print(f"Geometry residual={geometry_residual:.3e}")
+                print(
+                    f"Geometry residual={geometry_residual:.3e}, "
+                    f"relative={geometry_relative_error:.3e}"
+                )
 
                 print("Waiting for forces from fluid...")
                 force_data = self.read_json_line(fluid_file, "Fluid")
@@ -318,7 +381,13 @@ class VarFlExICoupler:
                 print("Forces received.")
 
                 forces_received_raw = [row[:] for row in forces]
-                relaxed_forces, relax_used, force_residual = self.relax_forces(forces)
+                (
+                    relaxed_forces,
+                    relax_used,
+                    force_residual,
+                    force_reference_norm,
+                    force_relative_error,
+                ) = self.relax_forces(forces)
                 force_data["force"] = relaxed_forces
 
                 q_inf = force_data.get("q_inf")
@@ -331,22 +400,73 @@ class VarFlExICoupler:
                 force_data["cl"] = cl
                 force_data["cd"] = cd
                 force_data["fluid_step_time"] = fluid_step_time
+                force_data["force_residual"] = force_residual
+                force_data["force_reference_norm"] = force_reference_norm
+                force_data["force_relative_error"] = force_relative_error
+
+                solid_geometry_absolute = vector_rows(
+                    geo_data.get("geometry_cp_absolute", []), "geometry_cp_absolute"
+                )
+                fluid_geometry_absolute = vector_rows(
+                    force_data.get("geometry_cp_absolute", []), "geometry_cp_absolute"
+                )
+                (
+                    geometry_transfer_residual,
+                    geometry_transfer_relative_error,
+                ) = transfer_metrics(
+                    solid_geometry_absolute,
+                    fluid_geometry_absolute,
+                    self.epsilon_reg,
+                )
 
                 if self.debug_io and relaxed_forces:
                     print(
                         f"Sample force[0] = {relaxed_forces[0]} "
-                        f"(relax={relax_used:.3f}, residual={force_residual:.3e})"
+                        f"(relax={relax_used:.3f}, residual={force_residual:.3e}, "
+                        f"relative={force_relative_error:.3e})"
                     )
+
+                print("Sending forces to solid...")
+                self.send_json(solid_conn, force_data)
+                force_transfer_data = self.read_json_line(
+                    solid_file, "Solid force-transfer diagnostic"
+                )
+                if force_transfer_data.get("type") != "force_transfer_diagnostics":
+                    raise RuntimeError(
+                        "Solid sent an unexpected message while coupling expected "
+                        f"force-transfer diagnostics at step {step}: {force_transfer_data}"
+                    )
+                force_transfer_step = int(force_transfer_data.get("step", -1))
+                if force_transfer_step != step:
+                    raise RuntimeError(
+                        f"Solid force-transfer diagnostic step mismatch: "
+                        f"got {force_transfer_step}, expected {step}"
+                    )
+                force_transfer_residual = optional_float(
+                    force_transfer_data, "force_transfer_residual"
+                )
+                force_transfer_relative_error = optional_float(
+                    force_transfer_data, "force_transfer_relative_error"
+                )
 
                 json.dump(
                     {
                         "step": step,
+                        "time": time_value,
                         "n_span": force_data.get("n_span"),
                         "n_chord": force_data.get("n_chord"),
                         "indexing": force_data.get("indexing", "span-major"),
                         "force_relax_used": relax_used,
                         "force_residual": force_residual,
+                        "force_reference_norm": force_reference_norm,
+                        "force_relative_error": force_relative_error,
+                        "force_transfer_residual": force_transfer_residual,
+                        "force_transfer_relative_error": force_transfer_relative_error,
                         "geometry_residual": geometry_residual,
+                        "geometry_reference_norm": geometry_reference_norm,
+                        "geometry_relative_error": geometry_relative_error,
+                        "geometry_transfer_residual": geometry_transfer_residual,
+                        "geometry_transfer_relative_error": geometry_transfer_relative_error,
                         "force_received": forces_received_raw,
                         "force_sent": relaxed_forces,
                         "lift": lift,
@@ -364,10 +484,19 @@ class VarFlExICoupler:
                 writer.writerow(
                     [
                         step,
+                        f"{time_value:.6e}" if time_value == time_value else "nan",
                         len(relaxed_forces),
                         f"{relax_used:.6f}",
                         f"{force_residual:.6e}",
+                        f"{force_reference_norm:.6e}",
+                        f"{force_relative_error:.6e}",
+                        f"{force_transfer_residual:.6e}" if force_transfer_residual == force_transfer_residual else "nan",
+                        f"{force_transfer_relative_error:.6e}" if force_transfer_relative_error == force_transfer_relative_error else "nan",
                         f"{geometry_residual:.6e}",
+                        f"{geometry_reference_norm:.6e}",
+                        f"{geometry_relative_error:.6e}",
+                        f"{geometry_transfer_residual:.6e}" if geometry_transfer_residual == geometry_transfer_residual else "nan",
+                        f"{geometry_transfer_relative_error:.6e}" if geometry_transfer_relative_error == geometry_transfer_relative_error else "nan",
                         f"{float(sample[0]):.6e}",
                         f"{float(sample[1]):.6e}",
                         f"{float(sample[2]):.6e}",
@@ -379,9 +508,6 @@ class VarFlExICoupler:
                         f"{fluid_step_time:.6e}" if fluid_step_time == fluid_step_time else "nan",
                     ]
                 )
-
-                print("Sending forces to solid...")
-                self.send_json(solid_conn, force_data)
 
             print("Coupling finished.")
             print(f"Coupling diagnostics saved at: {self.log_csv_path}")

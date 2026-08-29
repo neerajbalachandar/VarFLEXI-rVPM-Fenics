@@ -1,8 +1,8 @@
 run_name: static_airfoil_spanwise
 particles_per_step: 2
 save_every: 1
-aoa_deg: 8.0
-vinf: 8.0
+aoa_deg: 20.0
+vinf: 10.0
 rho: 1.0
 nu: 1.0e-06
 twist_root: 0.0
@@ -15,11 +15,11 @@ eta_bv: 0.25
 x: 1.0
 y: 1.0
 z: 1.0
-lambda_vpm: 2.0
-remove_every: 100
-sphere_factor: 200.0
-min_factor: 0.001
-max_factor: 50.0
+lambda_vpm: 1.5
+remove_every: 300
+sphere_factor: 150.0
+min_factor: 0.0008
+max_factor: 60.0
 wake_coupled: true
 start_with_wake: true
 unsteady: true
@@ -39,8 +39,8 @@ autotune_ncrit: true
 autotune_regularization: false
 default_rho_over_sigma: 1.0
 minimum_ncrit: 3
-viscous_scheme: CoreSpreading or None?
-save_directory: results/parameter_sweeps/pperstep/particles_step_2/results/fluid
+viscous_scheme: CoreSpreading
+save_directory: results/graphical_abstract2/fluid
 create_directory: true
 create_savepath: true
 prompt: false
@@ -53,3 +53,5 @@ save_horseshoes: true
 regularize_vlm: true
 use_ftot_force: true
 nsteps_save: 2
+max_particles: 400000
+max_particles_safety_factor: 3.0

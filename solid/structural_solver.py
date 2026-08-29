@@ -43,6 +43,34 @@ def cfg_get(cfg, *keys, default=None):
     return cur
 
 
+def optional_float(data, key, default=np.nan):
+    try:
+        value = data.get(key, default)
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def vector_norm(rows):
+    arr = np.asarray(rows, dtype=float)
+    if arr.size == 0:
+        return 0.0
+    return float(np.linalg.norm(arr.reshape(-1)))
+
+
+def residual_metrics(current, previous, epsilon_reg):
+    reference_norm = vector_norm(current)
+    if previous is None:
+        return 0.0, reference_norm, 0.0
+    current_arr = np.asarray(current, dtype=float)
+    previous_arr = np.asarray(previous, dtype=float)
+    if current_arr.shape != previous_arr.shape or current_arr.size == 0:
+        return 0.0, reference_norm, 0.0
+    residual = float(np.linalg.norm((current_arr - previous_arr).reshape(-1)))
+    relative_error = residual / max(reference_norm + epsilon_reg, 1.0e-300)
+    return residual, reference_norm, relative_error
+
+
 class StructuralSolver:
     def __init__(self, config_path):
         self.repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -66,6 +94,7 @@ class StructuralSolver:
         )
         self.dt_value = self.T / self.Nsteps
         self.dt = Constant(self.dt_value)
+        self.epsilon_reg = float(cfg_get(self.coupling_config, "epsilon_reg", default=1.0e-16))
 
     def _setup_domain(self):
         self.n_span_comm = int(
@@ -280,11 +309,23 @@ class StructuralSolver:
         self.work_rel_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.work_Wf = np.full((self.Nsteps,), np.nan, dtype=float)
         self.work_Ws = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.force_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.force_reference_norms = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.force_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.force_transfer_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.force_transfer_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.geometry_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.geometry_reference_norms = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.geometry_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.prev_geometry_sent = None
         self.ext_force_vec_template = self.model.q.vector().copy()
         self.ext_force_vec_template.zero()
         self.tip_x = self.domain.x_leading_edge_at(self.span) + self.eta_cp * self.domain.chord_at(self.span)
         self.tip_y = self.span - 1.0e-8
         self.zero_payload = [[0.0, 0.0, 0.0] for _ in range(self.transfer.cp_targets.shape[0])]
+        self.cp_reference_payload = self.transfer.cp_targets.tolist()
+        self.le_reference_payload = self.transfer.le_targets.tolist()
+        self.te_reference_payload = self.transfer.te_targets.tolist()
 
     def _send_initial_geometry(self):
         init_msg = {
@@ -300,6 +341,9 @@ class StructuralSolver:
             "geometry": self.zero_payload,
             "geometry_le": self.zero_payload,
             "geometry_te": self.zero_payload,
+            "geometry_cp_absolute": self.cp_reference_payload,
+            "geometry_le_absolute": self.le_reference_payload,
+            "geometry_te_absolute": self.te_reference_payload,
             "rotation": self.zero_payload,
             "rotation_le": self.zero_payload,
             "rotation_te": self.zero_payload,
@@ -353,6 +397,9 @@ class StructuralSolver:
                 raise RuntimeError("Coupling server disconnected while sending force data")
 
             data = json.loads(line)
+            self.force_residuals[i_step] = optional_float(data, "force_residual")
+            self.force_reference_norms[i_step] = optional_float(data, "force_reference_norm")
+            self.force_relative_errors[i_step] = optional_float(data, "force_relative_error")
             forces, used_structured_force = self.transfer.parse_force_payload(
                 data, len(self.eta_span_comm), 1, self.eta_span_comm, self.eta_cp_comm
             )
@@ -381,6 +428,26 @@ class StructuralSolver:
                 Fs_coeff, nodal_forces = self.transfer.apply_force_transfer(forces_eff)
             if not np.isfinite(nodal_forces).all():
                 raise RuntimeError(f"Non-finite mapped nodal forces at solid step {i_step + 1}")
+
+            (
+                force_transfer_residual,
+                force_transfer_relative_error,
+                _structural_force_common,
+            ) = self.transfer.force_transfer_metrics(
+                forces_eff,
+                nodal_forces,
+                Fs_coeff=Fs_coeff,
+                epsilon_reg=self.epsilon_reg,
+            )
+            self.force_transfer_residuals[i_step] = force_transfer_residual
+            self.force_transfer_relative_errors[i_step] = force_transfer_relative_error
+            force_transfer_msg = {
+                "type": "force_transfer_diagnostics",
+                "step": i_step + 1,
+                "force_transfer_residual": force_transfer_residual,
+                "force_transfer_relative_error": force_transfer_relative_error,
+            }
+            self.sock.sendall((json.dumps(force_transfer_msg) + "\n").encode())
 
             ext_force_vec = self.ext_force_vec_template.copy()
             ext_force_vec.zero()
@@ -501,6 +568,15 @@ class StructuralSolver:
                             )
                 u_cp_arr = (1.0 - self.eta_cp) * u_le_arr + self.eta_cp * u_te_arr
                 zero_rot = np.zeros_like(u_cp_arr)
+                (
+                    geometry_residual,
+                    geometry_reference_norm,
+                    geometry_relative_error,
+                ) = residual_metrics(u_cp_arr, self.prev_geometry_sent, self.epsilon_reg)
+                self.geometry_residuals[i_step] = geometry_residual
+                self.geometry_reference_norms[i_step] = geometry_reference_norm
+                self.geometry_relative_errors[i_step] = geometry_relative_error
+                self.prev_geometry_sent = u_cp_arr.copy()
 
                 if self.DEBUG_IO and (i_step == 0 or (i_step + 1) % 20 == 0):
                     print(
@@ -526,9 +602,15 @@ class StructuralSolver:
                         "geometry": u_cp_arr.tolist(),
                         "geometry_le": u_le_arr.tolist(),
                         "geometry_te": u_te_arr.tolist(),
+                        "geometry_cp_absolute": (self.transfer.cp_targets + u_cp_arr).tolist(),
+                        "geometry_le_absolute": (self.transfer.le_targets + u_le_arr).tolist(),
+                        "geometry_te_absolute": (self.transfer.te_targets + u_te_arr).tolist(),
                         "rotation": zero_rot.tolist(),
                         "rotation_le": zero_rot.tolist(),
                         "rotation_te": zero_rot.tolist(),
+                        "geometry_residual": geometry_residual,
+                        "geometry_reference_norm": geometry_reference_norm,
+                        "geometry_relative_error": geometry_relative_error,
                         "solid_step_time": solid_step_time,
                     }
                 )
@@ -549,7 +631,13 @@ class StructuralSolver:
             cfg_get(self.solid_config, "diag_csv_filename", default="solid_v18_diagnostics.csv"),
         )
         with open(diag_csv, "w") as fp:
-            fp.write("step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error,step_walltime\n")
+            fp.write(
+                "step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error,"
+                "force_residual,force_reference_norm,force_relative_error,"
+                "force_transfer_residual,force_transfer_relative_error,"
+                "geometry_residual,geometry_reference_norm,geometry_relative_error,"
+                "step_walltime\n"
+            )
             for k_idx in range(self.Nsteps):
                 fp.write(
                     f"{k_idx + 1},"
@@ -562,6 +650,14 @@ class StructuralSolver:
                     f"{self.work_Wf[k_idx]:.12e},"
                     f"{self.work_Ws[k_idx]:.12e},"
                     f"{self.work_rel_errors[k_idx]:.12e},"
+                    f"{self.force_residuals[k_idx]:.12e},"
+                    f"{self.force_reference_norms[k_idx]:.12e},"
+                    f"{self.force_relative_errors[k_idx]:.12e},"
+                    f"{self.force_transfer_residuals[k_idx]:.12e},"
+                    f"{self.force_transfer_relative_errors[k_idx]:.12e},"
+                    f"{self.geometry_residuals[k_idx]:.12e},"
+                    f"{self.geometry_reference_norms[k_idx]:.12e},"
+                    f"{self.geometry_relative_errors[k_idx]:.12e},"
                     f"{self.step_walltime[k_idx]:.12e}\n"
                 )
 

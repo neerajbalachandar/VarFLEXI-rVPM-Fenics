@@ -8,6 +8,10 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
 
     force_out = Vector{Vector{Float64}}(undef, m_span)
     prev_snapshot = copy(forces_prev)
+    geometry_cp_absolute = [
+        [Float64(wing._xm[i]), Float64(wing._ym[i]), Float64(wing._zm[i])]
+        for i in 1:m_span
+    ]
 
     frow = nothing
     if use_ftot_force[]
@@ -63,9 +67,13 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
     end
 
     force_mat = reduce(vcat, (reshape(force_out[k], 1, 3) for k in 1:length(force_out)))
-    force_res = norm(force_mat - prev_snapshot) / max(norm(force_mat), 1.0e-16)
+    force_res = norm(force_mat - prev_snapshot)
+    force_ref_norm = norm(force_mat)
+    force_rel_error = force_res / max(force_ref_norm + 1.0e-16, 1.0e-300)
     push!(step_hist, step)
     push!(force_res_hist, force_res)
+    push!(force_ref_norm_hist, force_ref_norm)
+    push!(force_rel_error_hist, force_rel_error)
 
     lift = sum(force_mat[:, 3])
     drag = -sum(force_mat[:, 1])
@@ -96,6 +104,9 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
             "cd" => cd,
             "q_inf" => q_inf,
             "ref_area" => ref_area,
+            "force_residual" => force_res,
+            "force_reference_norm" => force_ref_norm,
+            "force_relative_error" => force_rel_error,
             "fluid_step_time" => fluid_step_time,
         )),
     )
@@ -111,12 +122,16 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         "eta_span" => eta_span_force_payload,
         "eta_chord" => eta_chord_force,
         "force" => force_out,
+        "geometry_cp_absolute" => geometry_cp_absolute,
         "lift" => lift,
         "drag" => drag,
         "cl" => cl,
         "cd" => cd,
         "q_inf" => q_inf,
         "ref_area" => ref_area,
+        "force_residual" => force_res,
+        "force_reference_norm" => force_ref_norm,
+        "force_relative_error" => force_rel_error,
         "fluid_step_time" => fluid_step_time,
     )) * "\n")
     flush(sock)
@@ -132,8 +147,13 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         end
         u_prev_snapshot = copy(u_prev_cp)
         apply_from_message!(msg; first_step=false, step=step)
-        geom_res = norm(u_prev_cp - u_prev_snapshot) / max(norm(u_prev_cp), 1.0e-16)
+        geom_res = haskey(msg, "geometry_residual") ? Float64(msg["geometry_residual"]) : norm(u_prev_cp - u_prev_snapshot)
+        geom_ref_norm = haskey(msg, "geometry_reference_norm") ? Float64(msg["geometry_reference_norm"]) : norm(u_prev_cp)
+        geom_rel_error = haskey(msg, "geometry_relative_error") ? Float64(msg["geometry_relative_error"]) :
+                         geom_res / max(geom_ref_norm + 1.0e-16, 1.0e-300)
         push!(geom_res_hist, geom_res)
+        push!(geom_ref_norm_hist, geom_ref_norm)
+        push!(geom_rel_error_hist, geom_rel_error)
     end
 
     return step >= nsteps

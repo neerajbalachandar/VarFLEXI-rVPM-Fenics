@@ -25,17 +25,27 @@ uns.run_simulation(simulation, nsteps;
 )
 
 open(diag_path, "w") do io
-    println(io, "step,force_residual,geometry_residual,lift,drag,cl,cd,fluid_step_time")
+    println(
+        io,
+        "step,time,force_residual,force_reference_norm,force_relative_error," *
+        "geometry_residual,geometry_reference_norm,geometry_relative_error," *
+        "lift,drag,cl,cd,fluid_step_time"
+    )
     n = length(step_hist)
     for k in 1:n
         gres = k <= length(geom_res_hist) ? geom_res_hist[k] : NaN
+        gref = k <= length(geom_ref_norm_hist) ? geom_ref_norm_hist[k] : NaN
+        grel = k <= length(geom_rel_error_hist) ? geom_rel_error_hist[k] : NaN
         fres = k <= length(force_res_hist) ? force_res_hist[k] : NaN
+        fref = k <= length(force_ref_norm_hist) ? force_ref_norm_hist[k] : NaN
+        frel = k <= length(force_rel_error_hist) ? force_rel_error_hist[k] : NaN
         lift = k <= length(lift_hist) ? lift_hist[k] : NaN
         drag = k <= length(drag_hist) ? drag_hist[k] : NaN
         cl = k <= length(cl_hist) ? cl_hist[k] : NaN
         cd = k <= length(cd_hist) ? cd_hist[k] : NaN
         step_time = k <= length(fluid_step_time_hist) ? fluid_step_time_hist[k] : NaN
-        println(io, "$(step_hist[k]),$(fres),$(gres),$(lift),$(drag),$(cl),$(cd),$(step_time)")
+        time_value = step_hist[k] * dt
+        println(io, "$(step_hist[k]),$(time_value),$(fres),$(fref),$(frel),$(gres),$(gref),$(grel),$(lift),$(drag),$(cl),$(cd),$(step_time)")
     end
 end
 
