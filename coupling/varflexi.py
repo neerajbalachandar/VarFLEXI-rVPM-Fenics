@@ -324,6 +324,9 @@ class VarFlExICoupler:
                     "force_relative_error",
                     "force_transfer_residual",
                     "force_transfer_relative_error",
+                    "geometry_work_Wf",
+                    "geometry_work_Ws",
+                    "geometry_work_rel_error",
                     "geometry_residual",
                     "geometry_reference_norm",
                     "geometry_relative_error",
@@ -404,11 +407,13 @@ class VarFlExICoupler:
                 force_data["force_reference_norm"] = force_reference_norm
                 force_data["force_relative_error"] = force_relative_error
 
-                solid_geometry_absolute = vector_rows(
-                    geo_data.get("geometry_cp_absolute", []), "geometry_cp_absolute"
+                solid_geometry_absolute = (
+                    vector_rows(geo_data.get("geometry_le_absolute", []), "geometry_le_absolute")
+                    + vector_rows(geo_data.get("geometry_te_absolute", []), "geometry_te_absolute")
                 )
-                fluid_geometry_absolute = vector_rows(
-                    force_data.get("geometry_cp_absolute", []), "geometry_cp_absolute"
+                fluid_geometry_absolute = (
+                    vector_rows(force_data.get("geometry_le_absolute", []), "geometry_le_absolute")
+                    + vector_rows(force_data.get("geometry_te_absolute", []), "geometry_te_absolute")
                 )
                 (
                     geometry_transfer_residual,
@@ -448,6 +453,11 @@ class VarFlExICoupler:
                 force_transfer_relative_error = optional_float(
                     force_transfer_data, "force_transfer_relative_error"
                 )
+                geometry_work_Wf = optional_float(force_transfer_data, "geometry_work_Wf")
+                geometry_work_Ws = optional_float(force_transfer_data, "geometry_work_Ws")
+                geometry_work_rel_error = optional_float(
+                    force_transfer_data, "geometry_work_rel_error"
+                )
 
                 json.dump(
                     {
@@ -462,6 +472,9 @@ class VarFlExICoupler:
                         "force_relative_error": force_relative_error,
                         "force_transfer_residual": force_transfer_residual,
                         "force_transfer_relative_error": force_transfer_relative_error,
+                        "geometry_work_Wf": geometry_work_Wf,
+                        "geometry_work_Ws": geometry_work_Ws,
+                        "geometry_work_rel_error": geometry_work_rel_error,
                         "geometry_residual": geometry_residual,
                         "geometry_reference_norm": geometry_reference_norm,
                         "geometry_relative_error": geometry_relative_error,
@@ -492,6 +505,9 @@ class VarFlExICoupler:
                         f"{force_relative_error:.6e}",
                         f"{force_transfer_residual:.6e}" if force_transfer_residual == force_transfer_residual else "nan",
                         f"{force_transfer_relative_error:.6e}" if force_transfer_relative_error == force_transfer_relative_error else "nan",
+                        f"{geometry_work_Wf:.6e}" if geometry_work_Wf == geometry_work_Wf else "nan",
+                        f"{geometry_work_Ws:.6e}" if geometry_work_Ws == geometry_work_Ws else "nan",
+                        f"{geometry_work_rel_error:.6e}" if geometry_work_rel_error == geometry_work_rel_error else "nan",
                         f"{geometry_residual:.6e}",
                         f"{geometry_reference_norm:.6e}",
                         f"{geometry_relative_error:.6e}",

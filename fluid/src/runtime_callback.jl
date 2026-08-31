@@ -12,6 +12,14 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         [Float64(wing._xm[i]), Float64(wing._ym[i]), Float64(wing._zm[i])]
         for i in 1:m_span
     ]
+    geometry_le_absolute = [
+        [Float64(wing._xlwingdcr[i]), Float64(wing._ywingdcr[i]), Float64(wing._zlwingdcr[i])]
+        for i in 1:m_span
+    ]
+    geometry_te_absolute = [
+        [Float64(wing._xtwingdcr[i]), Float64(wing._ywingdcr[i]), Float64(wing._ztwingdcr[i])]
+        for i in 1:m_span
+    ]
 
     frow = nothing
     if use_ftot_force[]
@@ -123,6 +131,8 @@ function coupling_runtime_function(sim, PFIELD, T, DT; vprintln=(s)->nothing)
         "eta_chord" => eta_chord_force,
         "force" => force_out,
         "geometry_cp_absolute" => geometry_cp_absolute,
+        "geometry_le_absolute" => geometry_le_absolute,
+        "geometry_te_absolute" => geometry_te_absolute,
         "lift" => lift,
         "drag" => drag,
         "cl" => cl,

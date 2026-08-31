@@ -1,5 +1,5 @@
-total_time: 1.5
-n_steps: 300
+total_time: 1.0
+n_steps: 1000
 host: 127.0.0.1
 port: 9000
 comm_nspan: 80
@@ -22,4 +22,4 @@ payload_indexing: null
 send_cp: true
 send_le: true
 send_te: true
-results_root: results/graphical_abstract2
+results_root: results/dt_0.001_fig_reversetransfer/

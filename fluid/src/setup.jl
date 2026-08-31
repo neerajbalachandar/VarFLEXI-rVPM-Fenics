@@ -155,6 +155,8 @@ eta_span_force_payload = span_sampling_mode == "custom-stride" ? eta_span_coupli
 eta_chord_force = [eta_cp]
 
 u_prev_cp = zeros(Float64, m_span, 3)
+u_prev_le = zeros(Float64, m_span, 3)
+u_prev_te = zeros(Float64, m_span, 3)
 omega_prev_cp = zeros(Float64, m_span, 3)
 forces_prev = zeros(Float64, m_span, 3)
 

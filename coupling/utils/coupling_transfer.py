@@ -50,11 +50,28 @@ class CouplingTransfer:
             self._build_interface_sets()
         )
         self.cp_targets = self.domain.build_spanwise_targets(self.eta_span_comm, self.eta_cp, xi_eps=0.0)
-        self.le_targets = self.domain.build_spanwise_targets(
+        self.le_targets = self.domain.build_spanwise_targets(self.eta_span_comm, 0.0, xi_eps=0.0)
+        self.te_targets = self.domain.build_spanwise_targets(self.eta_span_comm, 1.0, xi_eps=0.0)
+
+        # Geometry transfer is intentionally separate from force transfer:
+        # structural field evaluation near the physical LE/TE forms the common
+        # displacement space, then an RBF map targets the aerodynamic LE/TE
+        # geometry space used by FLOWUnsteady.
+        self.geometry_common_le_targets = self.domain.build_spanwise_targets(
             self.eta_span_comm, 0.0, xi_eps=self.edge_eval_xi_eps
         )
-        self.te_targets = self.domain.build_spanwise_targets(
+        self.geometry_common_te_targets = self.domain.build_spanwise_targets(
             self.eta_span_comm, 1.0, xi_eps=self.edge_eval_xi_eps
+        )
+        self.geometry_common_targets = np.vstack(
+            (self.geometry_common_le_targets, self.geometry_common_te_targets)
+        )
+        self.geometry_aero_targets = np.vstack((self.le_targets, self.te_targets))
+        self.geometry_nbr_ids, self.geometry_nbr_w = RBFTransfer.build_local_rbf_map(
+            self.geometry_aero_targets[:, :2],
+            self.geometry_common_targets[:, :2],
+            self.rbf_radius,
+            n_neighbors=self.rbf_neighbors,
         )
 
         self.crm_backend = CommonRefinementMesh(self.domain, self.eta_span_comm)
@@ -283,6 +300,31 @@ class CouplingTransfer:
             raise RuntimeError("RBF backend is not initialized")
         return self.rbf_backend.apply(forces)
 
+    @staticmethod
+    def apply_rbf_interpolation(values, nbr_ids, nbr_w):
+        values = np.asarray(values, dtype=float).reshape(-1, 3)
+        if values.shape[0] == 0:
+            return np.zeros((nbr_ids.shape[0], 3), dtype=float)
+        return np.sum(nbr_w[:, :, None] * values[nbr_ids, :], axis=1)
+
+    def apply_geometry_transfer(self, u_fun, fallback_tree=None, fallback_vals=None):
+        """Evaluate u_s on the common interface and RBF-map it to aero LE/TE."""
+        u_common = self.sample_vector_field_at_targets(
+            u_fun,
+            self.geometry_common_targets,
+            fallback_tree=fallback_tree,
+            fallback_vals=fallback_vals,
+        )
+        u_aero_geometry = self.apply_rbf_interpolation(
+            u_common, self.geometry_nbr_ids, self.geometry_nbr_w
+        )
+        n_span = len(self.eta_span_comm)
+        u_le = u_aero_geometry[:n_span, :]
+        u_te = u_aero_geometry[n_span:, :]
+        return u_le, u_te, u_common, u_aero_geometry
+
+    # Diagnostic only: this probes the existing force-transfer path without
+    # redefining it as the transpose of the geometry-transfer operator.
     def force_transfer_to_aero_space(self, nodal_forces, Fs_coeff=None):
         if self.force_transfer_mode == "crm":
             return self.nodal_displacements_to_panel_average(

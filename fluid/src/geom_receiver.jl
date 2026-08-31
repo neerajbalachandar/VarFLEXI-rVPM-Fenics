@@ -16,27 +16,28 @@ function apply_from_message!(msg; first_step::Bool=false, step::Int=0)
     u_bv[:, 2] .*= disp_scale_y
     u_bv[:, 3] .*= disp_scale_z
 
-    # Relax only CP displacement state; LE/TE/BV follow this step's message.
-    u_cp .= geom_relax .* u_cp .+ (1 - geom_relax) .* u_prev_cp
-    omega_cp .= geom_relax .* omega_cp .+ (1 - geom_relax) .* omega_prev_cp
-
-    # Reconstruct LE/TE/BV from relaxed CP when edge payload is unavailable.
-    if !used_edge_payload
+    if used_edge_payload
+        u_le .= geom_relax .* u_le .+ (1 - geom_relax) .* u_prev_le
+        u_te .= geom_relax .* u_te .+ (1 - geom_relax) .* u_prev_te
+    else
+        u_cp .= geom_relax .* u_cp .+ (1 - geom_relax) .* u_prev_cp
         u_le .= u_cp
         u_te .= u_cp
-        u_bv .= u_cp
     end
+    omega_cp .= geom_relax .* omega_cp .+ (1 - geom_relax) .* omega_prev_cp
 
-    # Rotational correction at each geometry point.
-    # CP has no offset from itself; keep direct displacement at CP.
-    u_bv .+= cross_rows2(omega_bv, r_vortex_ref)
+    # Apply edge rotations, then keep CP/BV as deterministic LE/TE reconstructions.
     u_le .+= cross_rows2(omega_le, r_le_ref)
     u_te .+= cross_rows2(omega_te, r_te_ref)
+    u_cp .= (1 - eta_cp) .* u_le .+ eta_cp .* u_te
+    u_bv .= (1 - eta_bv) .* u_le .+ eta_bv .* u_te
 
     update_geometry_absolute_spanwise!(wing, wing_ref, u_cp, u_bv, u_le, u_te)
     ensure_gamma!(wing, m_span)
 
     u_prev_cp .= u_cp
+    u_prev_le .= u_le
+    u_prev_te .= u_te
     omega_prev_cp .= omega_cp
 
     if DEBUG_IO && (first_step || step == 1 || step % 20 == 0)

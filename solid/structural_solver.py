@@ -309,6 +309,9 @@ class StructuralSolver:
         self.work_rel_errors = np.full((self.Nsteps,), np.nan, dtype=float)
         self.work_Wf = np.full((self.Nsteps,), np.nan, dtype=float)
         self.work_Ws = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.geometry_work_rel_errors = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.geometry_work_Wf = np.full((self.Nsteps,), np.nan, dtype=float)
+        self.geometry_work_Ws = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_residuals = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_reference_norms = np.full((self.Nsteps,), np.nan, dtype=float)
         self.force_relative_errors = np.full((self.Nsteps,), np.nan, dtype=float)
@@ -441,11 +444,39 @@ class StructuralSolver:
             )
             self.force_transfer_residuals[i_step] = force_transfer_residual
             self.force_transfer_relative_errors[i_step] = force_transfer_relative_error
+            geometry_work_Wf = float("nan")
+            geometry_work_Ws = float("nan")
+            geometry_work_rel_error = float("nan")
+            if self.work_conservative_mode and nodal_forces is not None:
+                interface_disp_prev = self.transfer.get_nodal_displacements_plate(
+                    self.model.q_old,
+                    self.interface_node_ids,
+                    self.dofs_u_x,
+                    self.dofs_u_y,
+                    self.dofs_w,
+                )
+                u_le_prev, u_te_prev, _u_common_prev, _u_geom_prev = self.transfer.apply_geometry_transfer(
+                    self.model.q_old,
+                    fallback_tree=self.interface_tree,
+                    fallback_vals=interface_disp_prev,
+                )
+                u_cp_geom_prev = (1.0 - self.eta_cp) * u_le_prev + self.eta_cp * u_te_prev
+                geometry_work_Wf = float(np.sum(u_cp_geom_prev * (forces_eff * self.A_diag[:, None])))
+                geometry_work_Ws = float(np.sum(interface_disp_prev * nodal_forces))
+                geometry_work_rel_error = abs(geometry_work_Wf - geometry_work_Ws) / max(
+                    abs(geometry_work_Wf), abs(geometry_work_Ws), 1.0e-16
+                )
+                self.geometry_work_rel_errors[i_step] = geometry_work_rel_error
+                self.geometry_work_Wf[i_step] = geometry_work_Wf
+                self.geometry_work_Ws[i_step] = geometry_work_Ws
             force_transfer_msg = {
                 "type": "force_transfer_diagnostics",
                 "step": i_step + 1,
                 "force_transfer_residual": force_transfer_residual,
                 "force_transfer_relative_error": force_transfer_relative_error,
+                "geometry_work_Wf": geometry_work_Wf,
+                "geometry_work_Ws": geometry_work_Ws,
+                "geometry_work_rel_error": geometry_work_rel_error,
             }
             self.sock.sendall((json.dumps(force_transfer_msg) + "\n").encode())
 
@@ -492,10 +523,26 @@ class StructuralSolver:
                 self.work_rel_errors[i_step] = rel_work_err
                 self.work_Wf[i_step] = Wf
                 self.work_Ws[i_step] = Ws
+
+                u_le_prev, u_te_prev, _u_common_prev, _u_geom_prev = self.transfer.apply_geometry_transfer(
+                    self.model.q_old,
+                    fallback_tree=self.interface_tree,
+                    fallback_vals=interface_disp_prev,
+                )
+                u_cp_geom_prev = (1.0 - self.eta_cp) * u_le_prev + self.eta_cp * u_te_prev
+                Wf_geom = float(np.sum(u_cp_geom_prev * (forces_eff * self.A_diag[:, None])))
+                Ws_geom = float(np.sum(interface_disp_prev * nodal_forces))
+                rel_work_err_geom = abs(Wf_geom - Ws_geom) / max(
+                    abs(Wf_geom), abs(Ws_geom), 1.0e-16
+                )
+                self.geometry_work_rel_errors[i_step] = rel_work_err_geom
+                self.geometry_work_Wf[i_step] = Wf_geom
+                self.geometry_work_Ws[i_step] = Ws_geom
                 if i_step == 0 or (i_step + 1) % 20 == 0:
                     print(
                         f"Work audit step {i_step + 1}: "
-                        f"Wf={Wf:.6e}, Ws={Ws:.6e}, rel_err={rel_work_err:.3e}"
+                        f"Wf={Wf:.6e}, Ws={Ws:.6e}, rel_err={rel_work_err:.3e}, "
+                        f"geom_rel_err={rel_work_err_geom:.3e}"
                     )
 
             self.model.update_fields()
@@ -522,15 +569,8 @@ class StructuralSolver:
                     self.dofs_u_y,
                     self.dofs_w,
                 )
-                u_le_arr = self.transfer.sample_vector_field_at_targets(
+                u_le_arr, u_te_arr, _u_common_geom, _u_aero_geom = self.transfer.apply_geometry_transfer(
                     self.model.q,
-                    self.le_targets,
-                    fallback_tree=self.interface_tree,
-                    fallback_vals=interface_disp_cur,
-                )
-                u_te_arr = self.transfer.sample_vector_field_at_targets(
-                    self.model.q,
-                    self.te_targets,
                     fallback_tree=self.interface_tree,
                     fallback_vals=interface_disp_cur,
                 )
@@ -633,6 +673,7 @@ class StructuralSolver:
         with open(diag_csv, "w") as fp:
             fp.write(
                 "step,time,u_tip,E_elas,E_kin,E_damp,E_tot,work_Wf,work_Ws,work_rel_error,"
+                "geometry_work_Wf,geometry_work_Ws,geometry_work_rel_error,"
                 "force_residual,force_reference_norm,force_relative_error,"
                 "force_transfer_residual,force_transfer_relative_error,"
                 "geometry_residual,geometry_reference_norm,geometry_relative_error,"
@@ -650,6 +691,9 @@ class StructuralSolver:
                     f"{self.work_Wf[k_idx]:.12e},"
                     f"{self.work_Ws[k_idx]:.12e},"
                     f"{self.work_rel_errors[k_idx]:.12e},"
+                    f"{self.geometry_work_Wf[k_idx]:.12e},"
+                    f"{self.geometry_work_Ws[k_idx]:.12e},"
+                    f"{self.geometry_work_rel_errors[k_idx]:.12e},"
                     f"{self.force_residuals[k_idx]:.12e},"
                     f"{self.force_reference_norms[k_idx]:.12e},"
                     f"{self.force_relative_errors[k_idx]:.12e},"
